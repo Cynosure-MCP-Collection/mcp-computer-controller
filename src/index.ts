@@ -507,7 +507,7 @@ const server = new McpServer({
     version: '1.0.0',
     title: 'Computer Controller',
     description: 'Desktop automation: launch apps, capture screenshots, control mouse and keyboard.',
-    icons: [{ src: 'https://raw.githubusercontent.com/andreasjhagen/OpenAgent-MCPs/main/mcp-computer-controller/icon.png', mimeType: 'image/png' }],
+    icons: [{ src: 'https://raw.githubusercontent.com/andreasjhagen/Cynosure-MCPs/main/mcp-computer-controller/icon.png', mimeType: 'image/png' }],
 });
 
 // ── App launcher tools ──────────────────────────────────────────────────────
