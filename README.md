@@ -17,23 +17,25 @@ computer-controller
 
 ## Tools
 
-| Tool                    | Description                                   |
-| ----------------------- | --------------------------------------------- |
-| `list_applications`     | Index and search installed applications       |
-| `launch_application`    | Launch an application by name                 |
-| `get_screenshot`        | Capture the desktop (multi-monitor support)   |
-| `get_cursor_area`       | 512×512 screenshot centered on the cursor     |
-| `move_mouse`            | Move cursor to a position                     |
-| `click_mouse`           | Click at current or specified position        |
-| `double_click`          | Double-click at current or specified position |
-| `drag_mouse`            | Click-and-drag between positions              |
-| `scroll_mouse`          | Scroll the mouse wheel                        |
-| `get_mouse_position`    | Get current cursor location                   |
-| `type_text`             | Insert text at cursor                         |
-| `press_key_combination` | Press key combo (e.g., `ctrl+c`)              |
-| `get_screen_size`       | Get display dimensions                        |
-| `get_system_details`    | OS, CPU, memory, and disk info                |
-| `wait`                  | Pause for 1–10 seconds                        |
+| Tool                     | Description                                   |
+| ------------------------ | --------------------------------------------- |
+| `list_applications`      | Index and search installed applications       |
+| `launch_application`     | Launch an application by name                 |
+| `get_screenshot`         | Capture the desktop (multi-monitor support)   |
+| `get_cursor_area`        | 512×512 screenshot centered on the cursor     |
+| `move_mouse`             | Move cursor to a position                     |
+| `click_mouse`            | Click at current or specified position        |
+| `double_click`           | Double-click at current or specified position |
+| `drag_mouse`             | Click-and-drag between positions              |
+| `scroll_mouse`           | Scroll the mouse wheel                        |
+| `get_mouse_position`     | Get current cursor location                   |
+| `type_text`              | Insert text at cursor                         |
+| `press_key_combination`  | Press key combo (e.g., `ctrl+c`)              |
+| `control_media_playback` | Control media (play/pause/stop/next/previous) |
+| `control_volume`         | Control volume (up/down/mute)                 |
+| `get_screen_size`        | Get display dimensions                        |
+| `get_system_details`     | OS, CPU, memory, and disk info                |
+| `wait`                   | Pause for 1–10 seconds                        |
 
 ## Configuration
 

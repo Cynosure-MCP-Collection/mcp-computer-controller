@@ -1027,6 +1027,14 @@ server.registerTool(
                 up: 'up', down: 'down', left: 'left', right: 'right',
                 capslock: 'capslock', numlock: 'numlock', scrolllock: 'scrolllock',
                 printscreen: 'printscreen', pause: 'pause',
+                // Multimedia aliases
+                volumeup: 'audio_vol_up', volup: 'audio_vol_up',
+                volumedown: 'audio_vol_down', voldown: 'audio_vol_down',
+                volumemute: 'audio_mute', mute: 'audio_mute',
+                mediaplay: 'audio_play', playpause: 'audio_play',
+                mediapause: 'audio_pause', mediaresume: 'audio_play',
+                mediastop: 'audio_stop',
+                medianext: 'audio_next', mediaprevious: 'audio_prev',
             };
 
             // Support combined format like "ctrl+c", "alt+F4"
@@ -1051,6 +1059,83 @@ server.registerTool(
             return { content: [{ type: 'text' as const, text: `Pressed ${desc}.` }] };
         } catch (err) {
             return { content: [{ type: 'text' as const, text: `Error pressing key: ${(err as Error).message}` }], isError: true };
+        }
+    },
+);
+
+// ── Media / volume controls ────────────────────────────────────────────────
+
+function tapMultimediaKey(key: string): void {
+    robot.keyTap(key as any);
+}
+
+server.registerTool(
+    'control_media_playback',
+    {
+        description:
+            'Control system media playback (play/pause/stop/next/previous). ' +
+            'This uses multimedia key presses at OS level.',
+        inputSchema: {
+            action: z
+                .enum(['play_pause', 'play', 'pause', 'stop', 'next', 'previous'])
+                .describe('Media action to perform.'),
+        },
+    },
+    async ({ action }) => {
+        try {
+            const keyByAction: Record<string, string> = {
+                play_pause: 'audio_play',
+                play: 'audio_play',
+                pause: 'audio_pause',
+                stop: 'audio_stop',
+                next: 'audio_next',
+                previous: 'audio_prev',
+            };
+
+            const multimediaKey = keyByAction[action];
+            tapMultimediaKey(multimediaKey);
+            return { content: [{ type: 'text' as const, text: `Media action executed: ${action}.` }] };
+        } catch (err) {
+            return { content: [{ type: 'text' as const, text: `Error controlling media playback: ${(err as Error).message}` }], isError: true };
+        }
+    },
+);
+
+server.registerTool(
+    'control_volume',
+    {
+        description:
+            'Control system volume using multimedia keys. ' +
+            'Use up/down with optional steps, or mute to toggle mute state.',
+        inputSchema: {
+            action: z.enum(['up', 'down', 'mute']).describe('Volume action to perform.'),
+            steps: z
+                .number()
+                .int()
+                .min(1)
+                .max(30)
+                .optional()
+                .describe('How many key presses to apply for up/down (default: 1). Ignored for mute.'),
+        },
+    },
+    async ({ action, steps }) => {
+        try {
+            if (action === 'mute') {
+                tapMultimediaKey('audio_mute');
+                return { content: [{ type: 'text' as const, text: 'Volume mute toggled.' }] };
+            }
+
+            const key = action === 'up' ? 'audio_vol_up' : 'audio_vol_down';
+            const count = steps ?? 1;
+            for (let i = 0; i < count; i++) {
+                tapMultimediaKey(key);
+            }
+
+            return {
+                content: [{ type: 'text' as const, text: `Volume ${action} applied (${count} step${count === 1 ? '' : 's'}).` }],
+            };
+        } catch (err) {
+            return { content: [{ type: 'text' as const, text: `Error controlling volume: ${(err as Error).message}` }], isError: true };
         }
     },
 );
