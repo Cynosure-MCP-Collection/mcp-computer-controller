@@ -1020,14 +1020,30 @@ server.registerTool(
         try {
             // Normalize common key name variants to robotjs-expected names
             const keyMap: Record<string, string> = {
-                backspace: 'backspace', enter: 'return', return: 'return',
-                escape: 'escape', esc: 'escape', tab: 'tab', space: 'space',
-                delete: 'delete', del: 'delete', insert: 'insert',
-                home: 'home', end: 'end', pageup: 'pageup', pagedown: 'pagedown',
-                up: 'up', down: 'down', left: 'left', right: 'right',
-                capslock: 'capslock', numlock: 'numlock', scrolllock: 'scrolllock',
-                printscreen: 'printscreen', pause: 'pause',
-                // Multimedia aliases
+                backspace: 'backspace',
+                enter: 'enter',       // ← was 'return'
+                return: 'enter',      // ← map 'return' → 'enter'
+                escape: 'escape',
+                esc: 'escape',
+                tab: 'tab',
+                space: 'space',
+                delete: 'delete',
+                del: 'delete',
+                insert: 'insert',
+                home: 'home',
+                end: 'end',
+                pageup: 'pageup',
+                pagedown: 'pagedown',
+                up: 'up',
+                down: 'down',
+                left: 'left',
+                right: 'right',
+                capslock: 'capslock',
+                numlock: 'numlock',
+                scrolllock: 'scrolllock',
+                printscreen: 'printscreen',
+                pause: 'pause',
+                // Multimedia
                 volumeup: 'audio_vol_up', volup: 'audio_vol_up',
                 volumedown: 'audio_vol_down', voldown: 'audio_vol_down',
                 volumemute: 'audio_mute', mute: 'audio_mute',
