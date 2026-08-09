@@ -515,6 +515,7 @@ const server = new McpServer({
 server.registerTool(
     'list_applications',
     {
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description: 'List installed applications on the computer. Optionally filter by a search query. Use refresh=true to re-scan.',
         inputSchema: {
             query: z.string().optional().describe('Search filter — matches against app name, comment, or categories'),
@@ -553,6 +554,7 @@ server.registerTool(
 server.registerTool(
     'launch_application',
     {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
         description: 'Launch an installed application by name. The name must match an indexed application (case-insensitive, supports partial matching).',
         inputSchema: {
             name: z.string().describe('The name of the application to launch'),
@@ -672,6 +674,7 @@ function drawCursorCrosshair(pngBuf: Buffer, cx: number, cy: number): Buffer {
 server.registerTool(
     'get_screenshot',
     {
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description:
             'Capture a screenshot of the desktop. Call this after every action to verify the result before proceeding. ' +
             'The screenshot is scaled to agent display resolution. All click/mouse coordinates must be in this agent display space.',
@@ -825,6 +828,7 @@ function runCmdInput(input: string, cmd: string): Promise<void> {
 server.registerTool(
     'move_mouse',
     {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
         description:
             'Move the mouse cursor to a position in agent display space (coordinates from the most recent screenshot). ' +
             'After moving, take a screenshot to verify. Use smooth=true for a human-like gliding motion.',
@@ -855,6 +859,7 @@ server.registerTool(
 server.registerTool(
     'click_mouse',
     {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
         description:
             'Click a mouse button at the current cursor position. ' +
             'Use move_mouse first to position the cursor, then get_cursor_area to verify placement, then click. ' +
@@ -878,6 +883,7 @@ server.registerTool(
 server.registerTool(
     'double_click',
     {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
         description:
             'Double-click at the current cursor position. ' +
             'Use move_mouse first to position the cursor, then get_cursor_area to verify, then double_click.',
@@ -898,6 +904,7 @@ server.registerTool(
 server.registerTool(
     'drag_mouse',
     {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
         description:
             'Click and drag from one position to another in agent display space. ' +
             'Useful for selecting text, moving windows, or drag-and-drop operations. ' +
@@ -933,6 +940,7 @@ server.registerTool(
 server.registerTool(
     'scroll_mouse',
     {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
         description:
             'Scroll the mouse wheel at the current position or at specific coordinates. ' +
             'Positive values scroll down/right, negative scroll up/left. ' +
@@ -963,6 +971,7 @@ server.registerTool(
 server.registerTool(
     'get_mouse_position',
     {
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description: 'Get the current mouse cursor position in agent display space.',
     },
     async () => {
@@ -981,6 +990,7 @@ server.registerTool(
 server.registerTool(
     'type_text',
     {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
         description:
             'Inserts a string of text at the current cursor position. Click the target field first before typing to ensure focus. ',
         inputSchema: {
@@ -1000,6 +1010,7 @@ server.registerTool(
 server.registerTool(
     'press_key_combination',
     {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
         description:
             'Press a key or key combination. Supports combined format with "+" separator for shortcuts. ' +
             'Examples: "ctrl+c", "ctrl+shift+t", "alt+F4", "ctrl+a". ' +
@@ -1088,6 +1099,7 @@ function tapMultimediaKey(key: string): void {
 server.registerTool(
     'control_media_playback',
     {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
         description:
             'Control system media playback (play/pause/stop/next/previous). ' +
             'This uses multimedia key presses at OS level.',
@@ -1120,6 +1132,7 @@ server.registerTool(
 server.registerTool(
     'control_volume',
     {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
         description:
             'Control system volume using multimedia keys. ' +
             'Use up/down with optional steps, or mute to toggle mute state.',
@@ -1161,6 +1174,7 @@ server.registerTool(
 server.registerTool(
     'wait',
     {
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description: 'Pause execution for a specified number of seconds. Useful for waiting for UI transitions, page loads, or animations to complete.',
         inputSchema: {
             seconds: z.number().min(1).max(10).describe('Number of seconds to wait (1 – 10)'),
@@ -1175,6 +1189,7 @@ server.registerTool(
 server.registerTool(
     'get_screen_size',
     {
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description: 'Get the agent display resolution and physical screen resolution. Mouse/click coordinates use agent display space.',
     },
     async () => {
@@ -1206,6 +1221,7 @@ server.registerTool(
 server.registerTool(
     'get_system_details',
     {
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description: 'Get comprehensive system information including OS, CPU, memory, disk usage, hostname, uptime, and environment details.',
     },
     async () => {
@@ -1256,6 +1272,7 @@ server.registerTool(
 server.registerTool(
     'get_cursor_area',
     {
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description:
             `Capture a ${GEMINI_MODE ? '1000×1000' : '512×512'} screenshot centred on the current mouse cursor at full (native) resolution, ` +
             'with a red crosshair overlay marking the exact cursor position. ' +
