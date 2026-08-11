@@ -2,10 +2,10 @@
     "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
     "name": "io.github.andreasjhagen/computer-controller",
     "description": "MCP server for desktop automation: launch apps, capture screenshots, control mouse and keyboard",
-    "version": "1.0.1",
+    "version": "1.0.4",
     "icons": [
         {
-            "src": "https://raw.githubusercontent.com/andreasjhagen/Cynosure-MCPs/main/mcp-computer-controller/icon.png",
+            "src": "https://unpkg.com/@cynosure-mcp/computer-controller@1.0.4/icon.png",
             "mimeType": "image/png"
         }
     ],
@@ -13,7 +13,7 @@
         {
             "registryType": "npm",
             "identifier": "@cynosure-mcp/computer-controller",
-            "version": "1.0.1",
+            "version": "1.0.4",
             "transport": {
                 "type": "stdio"
             },

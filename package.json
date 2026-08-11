@@ -1,7 +1,7 @@
 {
   "name": "@cynosure-mcp/computer-controller",
   "mcpName": "io.github.andreasjhagen/computer-controller",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "MCP server for desktop automation: launch apps, capture screenshots, control mouse and keyboard",
   "type": "module",
   "main": "dist/index.js",
