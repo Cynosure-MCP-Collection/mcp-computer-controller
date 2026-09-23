@@ -1,6 +1,6 @@
 # @cynosure-mcp/computer-controller
 
-MCP server for desktop automation — launch apps, capture screenshots, control mouse and keyboard. Supports multi-monitor setups and Gemini-optimized screenshot scaling.
+MCP server for desktop automation — launch apps, capture screenshots, control mouse and keyboard. Screenshots carry explicit coordinate frames, including multi-monitor offsets.
 
 ## Installation
 
@@ -37,26 +37,27 @@ computer-controller
 | `get_system_details`     | OS, CPU, memory, and disk info                |
 | `wait`                   | Pause for 1–10 seconds                        |
 
+The server also exposes the MCP resource `computer-controller://guide` with its computer-use workflow and coordinate rules. Resource inclusion is controlled by the MCP host; read it explicitly if the host does not add it to the model context.
+
+### Screenshot coordinates
+
+Call `get_screenshot` first. Its text result contains the actual image dimensions and a `Frame` token. Pass that token as `frame` to `move_mouse`, `click_mouse`, `double_click`, `drag_mouse`, `scroll_mouse`, `get_mouse_position`, and `get_cursor_area`. Coordinates are zero-based pixels in **that image**. The token expires after five minutes and is rejected if the display layout changes; take another screenshot to recover. No global "current display" setting is used to map later actions.
+
+**Version 2 migration:** Mouse tools now require `frame`. `GEMINI_MODE` and `sys_prompt_template.txt` were removed; use `WIDTH`/`HEIGHT` and the guide resource. Without size limits, screenshots use native capture dimensions.
+
+Omitting `display` captures the full desktop. `display: 0` selects the primary monitor, `display: 1` the next monitor. A failed monitor capture returns an error; it never returns a different monitor or the full desktop as a successful result. Capture backends are checked against their expected pixel dimensions. On macOS, multi-monitor capture currently fails closed until a geometry-aware backend is available.
+
 ## Configuration
 
 | Variable        | Required | Description                                                                                            |
 | --------------- | -------- | ------------------------------------------------------------------------------------------------------ |
-| `DISPLAY_INDEX` | No       | Restrict to a specific monitor. `0` or unset = all displays; `1` = primary; `2` = second display; etc. |
-| `GEMINI_MODE`   | No       | Set to `true` to scale screenshots to fit within 1000×1000 for Gemini models                           |
+| `DISPLAY_INDEX` | No | Restrict screenshots to a monitor: `0` or unset = all displays; `1` = primary; `2` = second display. |
+| `WIDTH` | No | Maximum screenshot width in pixels (1–16384). |
+| `HEIGHT` | No | Maximum screenshot height in pixels (1–16384). |
 
-### Screenshot Scaling
+### Screenshot scaling
 
-Screenshots are automatically scaled to fit within model-friendly dimensions.
-In standard mode (optimized for Claude Sonnet) the output is downscaled to one of 1024×768, 1280×800, or 1280×720 depending on screen aspect ratio.
-
-When `GEMINI_MODE` is enabled, all screenshots are scaled to fit within a 1000×1000 bounding box (maintaining aspect ratio) and bottom-padded with black to exactly 1000×1000. Content always starts at coordinate (0, 0).
-
-| Resolution | Scale Factor | Content Area | Bottom Padding |
-| ---------- | ------------ | ------------ | -------------- |
-| 1920×1080  | 0.5208       | 1000×563     | 437px          |
-| 2560×1440  | 0.3906       | 1000×563     | 437px          |
-| 3840×2160  | 0.2604       | 1000×563     | 437px          |
-| 1920×1200  | 0.5208       | 1000×625     | 375px          |
+`WIDTH` and `HEIGHT` bound the image sent to the model. Set either or both. The image keeps its aspect ratio, is never enlarged or padded, and may be smaller than both limits. With neither set, screenshots stay at native capture size. These variables do not change the operating system's display resolution. The image dimensions reported by `get_screenshot` are the coordinate bounds.
 
 ## MCP Config
 
@@ -67,7 +68,8 @@ When `GEMINI_MODE` is enabled, all screenshots are scaled to fit within a 1000×
       "command": "npx",
       "args": ["@cynosure-mcp/computer-controller"],
       "env": {
-        "GEMINI_MODE": "true"
+        "WIDTH": "1000",
+        "HEIGHT": "1000"
       }
     }
   }
