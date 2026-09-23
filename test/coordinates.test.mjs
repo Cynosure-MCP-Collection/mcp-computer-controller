@@ -23,15 +23,15 @@ test('landscape and portrait images keep aspect ratio without padding', async ()
 });
 
 test('coordinates map to the exact captured rectangle, including negative offsets', () => {
-    const frame = { bounds: { x: -1920, y: -100, width: 1920, height: 1080 }, width: 1000, height: 563, layout: 'test', capturedAt: Date.now() };
-    assert.equal(validateCoords(frame, 999, 562), null);
-    assert.match(validateCoords(frame, 1000, 562), /out of bounds/);
-    assert.match(validateCoords(frame, 0, 563), /out of bounds/);
-    assert.deepEqual(agentToScreen(frame, 0, 0), { px: -1920, py: -100 });
-    assert.deepEqual(agentToScreen(frame, 999, 562), { px: -1, py: 979 });
+    const space = { bounds: { x: -1920, y: -100, width: 1920, height: 1080 }, width: 1000, height: 563 };
+    assert.equal(validateCoords(space, 999, 562), null);
+    assert.match(validateCoords(space, 1000, 562), /out of bounds/);
+    assert.match(validateCoords(space, 0, 563), /out of bounds/);
+    assert.deepEqual(agentToScreen(space, 0, 0), { px: -1920, py: -100 });
+    assert.deepEqual(agentToScreen(space, 999, 562), { px: -1, py: 979 });
     for (const [x, y] of [[0, 0], [500, 300], [999, 562]]) {
-        const { px, py } = agentToScreen(frame, x, y);
-        const roundTrip = screenToAgent(frame, px, py);
+        const { px, py } = agentToScreen(space, x, y);
+        const roundTrip = screenToAgent(space, px, py);
         assert.ok(Math.abs(roundTrip.ax - x) <= 1);
         assert.ok(Math.abs(roundTrip.ay - y) <= 1);
     }

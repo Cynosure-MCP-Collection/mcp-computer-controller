@@ -1,6 +1,6 @@
 # @cynosure-mcp/computer-controller
 
-MCP server for desktop automation — launch apps, capture screenshots, control mouse and keyboard. Screenshots carry explicit coordinate frames, including multi-monitor offsets.
+MCP server for desktop automation — launch apps, capture screenshots, control mouse and keyboard. Screenshot and input coordinates use the same display geometry, including multi-monitor offsets.
 
 ## Installation
 
@@ -41,9 +41,9 @@ The server also exposes the MCP resource `computer-controller://guide` with its 
 
 ### Screenshot coordinates
 
-Call `get_screenshot` first. Its text result contains the actual image dimensions and a `Frame` token. Pass that token as `frame` to `move_mouse`, `click_mouse`, `double_click`, `drag_mouse`, `scroll_mouse`, `get_mouse_position`, and `get_cursor_area`. Coordinates are zero-based pixels in **that image**. The token expires after five minutes and is rejected if the display layout changes; take another screenshot to recover. No global "current display" setting is used to map later actions.
+Call `get_screenshot` first. Its text result contains the actual image dimensions and the selected display. Coordinates are zero-based pixels in **that image**. If you captured `display: 0`, pass `display: 0` to mouse tools. If you omitted `display` to capture the full desktop, omit it on mouse tools too. Screenshot and mouse tools independently compute the same mapping from the current display geometry and `WIDTH`/`HEIGHT` limits; no token or global "current display" setting is needed.
 
-**Version 2 migration:** Mouse tools now require `frame`. `GEMINI_MODE` and `sys_prompt_template.txt` were removed; use `WIDTH`/`HEIGHT` and the guide resource. Without size limits, screenshots use native capture dimensions.
+**Version 2 migration:** `GEMINI_MODE` and `sys_prompt_template.txt` were removed; use `WIDTH`/`HEIGHT` and the guide resource. Without size limits, screenshots use native capture dimensions. Mouse tools accept an optional `display` number.
 
 Omitting `display` captures the full desktop. `display: 0` selects the primary monitor, `display: 1` the next monitor. A failed monitor capture returns an error; it never returns a different monitor or the full desktop as a successful result. Capture backends are checked against their expected pixel dimensions. On macOS, multi-monitor capture currently fails closed until a geometry-aware backend is available.
 

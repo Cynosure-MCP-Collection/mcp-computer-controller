@@ -540,7 +540,7 @@ const server = new McpServer({
 
 server.registerResource('computer_controller_guide', GUIDE_URI, {
     title: 'Computer Controller usage guide',
-    description: 'Coordinate frames and a practical computer-use workflow.',
+    description: 'Screenshot coordinates and a practical computer-use workflow.',
     mimeType: 'text/markdown',
     annotations: { audience: ['assistant'], priority: 0.8 },
 }, async () => ({ contents: [{ uri: GUIDE_URI, mimeType: 'text/markdown', text: GUIDE }] }));
@@ -710,7 +710,7 @@ server.registerTool(
     'get_screenshot',
     {
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description: 'Capture the desktop and return its image dimensions and frame token. Pass the frame token to coordinate-based tools. WIDTH and HEIGHT optionally bound the returned image size.',
+        description: 'Capture the desktop and return its image dimensions. Pass the same display number to mouse tools. WIDTH and HEIGHT optionally bound the image size.',
         inputSchema: {
             display: z.number().int().min(0).optional().describe('Display/monitor number (0 = primary). Omit for the full desktop.'),
             delay_ms: z.number().int().min(0).max(5000).default(2000)
@@ -723,13 +723,12 @@ server.registerTool(
             if (delay_ms > 0) await new Promise(r => setTimeout(r, delay_ms));
             const captured = await captureScreenshot(effectiveDisplay);
             const scaled = await scaleScreenshot(captured.buf, captured.bounds.width, captured.bounds.height);
-            const frame: Frame = { bounds: captured.bounds, width: scaled.width, height: scaled.height, layout: captured.layout, capturedAt: Date.now() };
-            const frameToken = issueFrame(frame);
+            const space: ImageSpace = { bounds: captured.bounds, width: scaled.width, height: scaled.height };
 
             // Get current mouse position and draw crosshair on screenshot
             const mousePos = robot.getMousePos();
-            const { ax: mouseX, ay: mouseY } = screenToAgent(frame, mousePos.x, mousePos.y);
-            const annotatedBuf = mouseX >= 0 && mouseY >= 0 && mouseX < frame.width && mouseY < frame.height
+            const { ax: mouseX, ay: mouseY } = screenToAgent(space, mousePos.x, mousePos.y);
+            const annotatedBuf = mouseX >= 0 && mouseY >= 0 && mouseX < space.width && mouseY < space.height
                 ? drawCursorCrosshair(scaled.buf, mouseX, mouseY) : scaled.buf;
 
             const base64 = annotatedBuf.toString('base64');
@@ -738,10 +737,11 @@ server.registerTool(
                     { type: 'image' as const, data: base64, mimeType: 'image/png' },
                     {
                         type: 'text' as const,
-                        text: `Image: ${frame.width}×${frame.height} pixels. ` +
-                            `Valid coordinates: x=0..${frame.width - 1}, y=0..${frame.height - 1}. ` +
-                            `Cursor: (${mouseX}, ${mouseY})${mouseX < 0 || mouseY < 0 || mouseX >= frame.width || mouseY >= frame.height ? ' outside image' : ''}. ` +
-                            `Frame: ${frameToken}`
+                        text: `Image: ${space.width}×${space.height} pixels. ` +
+                            `Display: ${effectiveDisplay === undefined ? 'full desktop' : effectiveDisplay}. ` +
+                            `Valid coordinates: x=0..${space.width - 1}, y=0..${space.height - 1}. ` +
+                            `Cursor: (${mouseX}, ${mouseY})${mouseX < 0 || mouseY < 0 || mouseX >= space.width || mouseY >= space.height ? ' outside image' : ''}. ` +
+                            `Use the same display value for mouse tools.`
                     },
                 ]
             };
@@ -842,21 +842,21 @@ server.registerTool(
     {
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
         description:
-            'Move the mouse cursor to a position in the referenced screenshot. ' +
+            'Move the mouse cursor to a position in screenshot coordinates. Use the same display number as get_screenshot. ' +
             'After moving, take a screenshot to verify. Use smooth=true for a human-like gliding motion.',
         inputSchema: {
             x: z.number().int().describe('X coordinate in agent display space'),
             y: z.number().int().describe('Y coordinate in agent display space'),
-            frame: z.string().describe('Frame token returned by get_screenshot'),
+            display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop'),
             smooth: z.boolean().default(true).describe('Use smooth/humanized movement (default: true)'),
         },
     },
-    async ({ x, y, smooth, frame: token }) => {
+    async ({ x, y, smooth, display }) => {
         try {
-            const frame = await readFrame(token);
-            const error = validateCoords(frame, x, y);
+            const space = await getImageSpace(display);
+            const error = validateCoords(space, x, y);
             if (error) return { content: [{ type: 'text' as const, text: error }], isError: true };
-            const { px, py } = agentToScreen(frame, x, y);
+            const { px, py } = agentToScreen(space, x, y);
             if (smooth) {
                 robot.moveMouseSmooth(px, py);
             } else {
@@ -875,21 +875,21 @@ server.registerTool(
     {
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
         description:
-            'Click a mouse button at the current cursor position, using a frame token to verify display layout. ' +
+            'Click a mouse button at the current cursor position. Use the same display number as get_screenshot. ' +
             'Use move_mouse first to position the cursor, then get_cursor_area to verify placement, then click. ' +
             'Workflow: move_mouse → get_cursor_area → (refine if needed) → click_mouse.',
         inputSchema: {
             button: z.enum(['left', 'right', 'middle']).default('left').describe('Mouse button to click'),
-            frame: z.string().describe('Frame token returned by get_screenshot'),
+            display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop'),
         },
     },
-    async ({ button, frame: token }) => {
+    async ({ button, display }) => {
         try {
-            const frame = await readFrame(token);
+            const space = await getImageSpace(display);
             const pos = robot.getMousePos();
-            if (pos.x < frame.bounds.x || pos.y < frame.bounds.y || pos.x >= frame.bounds.x + frame.bounds.width || pos.y >= frame.bounds.y + frame.bounds.height) throw new Error('Cursor is outside the referenced screenshot.');
+            assertCursorInSpace(space, pos.x, pos.y);
             robot.mouseClick(button);
-            const { ax, ay } = screenToAgent(frame, pos.x, pos.y);
+            const { ax, ay } = screenToAgent(space, pos.x, pos.y);
             return { content: [{ type: 'text' as const, text: `${button} clicked at (${ax}, ${ay}).` }] };
         } catch (err) {
             return { content: [{ type: 'text' as const, text: `Error clicking: ${(err as Error).message}` }], isError: true };
@@ -904,15 +904,15 @@ server.registerTool(
         description:
             'Double-click at the current cursor position. ' +
             'Use move_mouse first to position the cursor, then get_cursor_area to verify, then double_click.',
-        inputSchema: { frame: z.string().describe('Frame token returned by get_screenshot') },
+        inputSchema: { display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop') },
     },
-    async ({ frame: token }) => {
+    async ({ display }) => {
         try {
-            const frame = await readFrame(token);
+            const space = await getImageSpace(display);
             const pos = robot.getMousePos();
-            if (pos.x < frame.bounds.x || pos.y < frame.bounds.y || pos.x >= frame.bounds.x + frame.bounds.width || pos.y >= frame.bounds.y + frame.bounds.height) throw new Error('Cursor is outside the referenced screenshot.');
+            assertCursorInSpace(space, pos.x, pos.y);
             robot.mouseClick('left', true);
-            const { ax, ay } = screenToAgent(frame, pos.x, pos.y);
+            const { ax, ay } = screenToAgent(space, pos.x, pos.y);
             return { content: [{ type: 'text' as const, text: `Double-clicked at (${ax}, ${ay}).` }] };
         } catch (err) {
             return { content: [{ type: 'text' as const, text: `Error double-clicking: ${(err as Error).message}` }], isError: true };
@@ -933,18 +933,18 @@ server.registerTool(
             startY: z.number().int().describe('Start Y in agent display space'),
             endX: z.number().int().describe('End X in agent display space'),
             endY: z.number().int().describe('End Y in agent display space'),
-            frame: z.string().describe('Frame token returned by get_screenshot'),
+            display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop'),
         },
     },
-    async ({ startX, startY, endX, endY, frame: token }) => {
+    async ({ startX, startY, endX, endY, display }) => {
         try {
-            const frame = await readFrame(token);
-            const startErr = validateCoords(frame, startX, startY);
+            const space = await getImageSpace(display);
+            const startErr = validateCoords(space, startX, startY);
             if (startErr) return { content: [{ type: 'text' as const, text: `Start ${startErr}` }], isError: true };
-            const endErr = validateCoords(frame, endX, endY);
+            const endErr = validateCoords(space, endX, endY);
             if (endErr) return { content: [{ type: 'text' as const, text: `End ${endErr}` }], isError: true };
-            const start = agentToScreen(frame, startX, startY);
-            const end = agentToScreen(frame, endX, endY);
+            const start = agentToScreen(space, startX, startY);
+            const end = agentToScreen(space, endX, endY);
             robot.moveMouseSmooth(start.px, start.py);
             await sleep(MOUSE_SETTLE_MS); // wait for move to complete before pressing down
             robot.mouseToggle('down', 'left');
@@ -974,22 +974,22 @@ server.registerTool(
             x: z.number().int().default(0).describe('Horizontal scroll amount (positive = right, negative = left)'),
             atX: z.number().int().optional().describe('Optional X in agent display space to move to before scrolling'),
             atY: z.number().int().optional().describe('Optional Y in agent display space to move to before scrolling'),
-            frame: z.string().describe('Frame token returned by get_screenshot'),
+            display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop'),
         },
     },
-    async ({ x, y, atX, atY, frame: token }) => {
+    async ({ x, y, atX, atY, display }) => {
         try {
-            const frame = await readFrame(token);
+            const space = await getImageSpace(display);
             if ((atX === undefined) !== (atY === undefined)) throw new Error('Provide both atX and atY, or neither.');
             if (atX !== undefined && atY !== undefined) {
-                const coordErr = validateCoords(frame, atX, atY);
+                const coordErr = validateCoords(space, atX, atY);
                 if (coordErr) return { content: [{ type: 'text' as const, text: coordErr }], isError: true };
-                const { px, py } = agentToScreen(frame, atX, atY);
+                const { px, py } = agentToScreen(space, atX, atY);
                 robot.moveMouseSmooth(px, py);
                 await sleep(MOUSE_SETTLE_MS);
             } else {
                 const pos = robot.getMousePos();
-                if (pos.x < frame.bounds.x || pos.y < frame.bounds.y || pos.x >= frame.bounds.x + frame.bounds.width || pos.y >= frame.bounds.y + frame.bounds.height) throw new Error('Cursor is outside the referenced screenshot.');
+                assertCursorInSpace(space, pos.x, pos.y);
             }
             robot.scrollMouse(x, y);
             return { content: [{ type: 'text' as const, text: `Scrolled (x: ${x}, y: ${y})${atX !== undefined ? ` at (${atX}, ${atY})` : ''}.` }] };
@@ -1003,14 +1003,14 @@ server.registerTool(
     'get_mouse_position',
     {
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description: 'Get the current mouse cursor position in the referenced screenshot.',
-        inputSchema: { frame: z.string().describe('Frame token returned by get_screenshot') },
+        description: 'Get the current mouse cursor position in screenshot coordinates for the selected display.',
+        inputSchema: { display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop') },
     },
-    async ({ frame: token }) => {
+    async ({ display }) => {
         try {
-            const frame = await readFrame(token);
+            const space = await getImageSpace(display);
             const pos = robot.getMousePos();
-            const { ax, ay } = screenToAgent(frame, pos.x, pos.y);
+            const { ax, ay } = screenToAgent(space, pos.x, pos.y);
             return { content: [{ type: 'text' as const, text: `Mouse position: (${ax}, ${ay}) in agent display space.` }] };
         } catch (err) {
             return { content: [{ type: 'text' as const, text: `Error getting mouse position: ${(err as Error).message}` }], isError: true };
@@ -1223,7 +1223,7 @@ server.registerTool(
     'get_screen_size',
     {
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description: 'Get physical display geometry and configured screenshot size limits. Use get_screenshot for image dimensions and a frame token.',
+        description: 'Get physical display geometry and configured screenshot size limits. Use get_screenshot for actual image dimensions.',
     },
     async () => {
         try {
@@ -1236,7 +1236,7 @@ server.registerTool(
                         `Virtual desktop: ${bounds.width}×${bounds.height} at (${bounds.x}, ${bounds.y}).\n` +
                         `Displays: ${displays.map((d, i) => `${i}:${d.name} ${d.width}×${d.height} at (${d.x},${d.y})`).join('; ')}.\n` +
                         `Screenshot limits: WIDTH=${MAX_WIDTH ?? 'unbounded'}, HEIGHT=${MAX_HEIGHT ?? 'unbounded'}. ` +
-                        `Take a screenshot for its actual image dimensions and frame token.`
+                        `Take a screenshot for its actual image dimensions.`
                 }]
             };
         } catch (err) {
@@ -1305,23 +1305,23 @@ server.registerTool(
             'with a red crosshair overlay marking the exact cursor position. ' +
             'Useful for inspecting the precise area around the cursor: reading small text, verifying click targets, or confirming hover states. ' +
             'Returns the screenshot plus the cursor coordinates in agent display space.',
-        inputSchema: { frame: z.string().describe('Frame token returned by get_screenshot') },
+        inputSchema: { display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop') },
     },
-    async ({ frame: token }) => {
+    async ({ display }) => {
         try {
-            const frame = await readFrame(token);
+            const space = await getImageSpace(display);
             const SIZE = 512;
             const HALF = SIZE / 2;
 
             // 1. Get cursor position in physical screen coordinates
             const mousePos = robot.getMousePos();
-            if (mousePos.x < frame.bounds.x || mousePos.y < frame.bounds.y || mousePos.x >= frame.bounds.x + frame.bounds.width || mousePos.y >= frame.bounds.y + frame.bounds.height) throw new Error('Cursor is outside the referenced screenshot.');
+            assertCursorInSpace(space, mousePos.x, mousePos.y);
 
             // 2. Determine capture region, clamped to screen bounds
-            const left = Math.max(frame.bounds.x, mousePos.x - HALF);
-            const top = Math.max(frame.bounds.y, mousePos.y - HALF);
-            const right = Math.min(frame.bounds.x + frame.bounds.width, mousePos.x + HALF);
-            const bottom = Math.min(frame.bounds.y + frame.bounds.height, mousePos.y + HALF);
+            const left = Math.max(space.bounds.x, mousePos.x - HALF);
+            const top = Math.max(space.bounds.y, mousePos.y - HALF);
+            const right = Math.min(space.bounds.x + space.bounds.width, mousePos.x + HALF);
+            const bottom = Math.min(space.bounds.y + space.bounds.height, mousePos.y + HALF);
             const captureW = right - left;
             const captureH = bottom - top;
 
@@ -1330,13 +1330,8 @@ server.registerTool(
             }
 
             // 3. Capture with the same verified backend and geometry as get_screenshot.
-            const displays = await getDisplayGeometries();
-            const fullBounds = unionBounds(displays);
-            const isFullDesktop = JSON.stringify(frame.bounds) === JSON.stringify(fullBounds);
-            const selectedDisplay = isFullDesktop ? undefined : displays.findIndex(d =>
-                d.x === frame.bounds.x && d.y === frame.bounds.y && d.width === frame.bounds.width && d.height === frame.bounds.height);
-            if (selectedDisplay === -1) throw new Error('Frame display is unavailable. Take a new screenshot.');
-            const captured = await captureScreenshot(selectedDisplay);
+            const captured = await captureScreenshot(resolveDisplay(display));
+            if (captured.bounds.x !== space.bounds.x || captured.bounds.y !== space.bounds.y || captured.bounds.width !== space.bounds.width || captured.bounds.height !== space.bounds.height) throw new Error('Display layout changed. Take a new screenshot.');
             let pngBuf = cropPng(captured.buf, left - captured.bounds.x, top - captured.bounds.y, captureW, captureH);
 
             // 4. If capture is smaller than 512×512 (cursor near edge), paste into a 512×512 canvas
@@ -1372,7 +1367,7 @@ server.registerTool(
             const annotated = drawCursorCrosshair(pngBuf, cursorInImageX, cursorInImageY);
 
             // 7. Report coordinates in agent display space
-            const { ax, ay } = screenToAgent(frame, mousePos.x, mousePos.y);
+            const { ax, ay } = screenToAgent(space, mousePos.x, mousePos.y);
 
             return {
                 content: [
