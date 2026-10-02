@@ -3,12 +3,16 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { promises as fs } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { exec, execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { platform, homedir, tmpdir } from 'node:os';
 import robot from '@hurdlegroup/robotjs';
 import { PNG } from 'pngjs';
-import { getScaleInfo, scaleScreenshot, agentToScreen as _agentToScreen, screenToAgent as _screenToAgent, validateCoords, overrideScaleInfo, scaleBufferForDisplay, GEMINI_MODE } from './scaling.js';
+import { scaleScreenshot, imageSize, agentToScreen, screenToAgent, validateCoords, MAX_WIDTH, MAX_HEIGHT, type ImageSpace, type Rect } from './scaling.js';
+import { GUIDE, GUIDE_URI } from './guide.js';
+import { displayAtCursor } from './displays.js';
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Display restriction
@@ -23,37 +27,15 @@ import { getScaleInfo, scaleScreenshot, agentToScreen as _agentToScreen, screenT
  */
 const RESTRICTED_DISPLAY: number | undefined = (() => {
     if (process.env.DISPLAY_INDEX === undefined) return undefined;
-    const idx = parseInt(process.env.DISPLAY_INDEX, 10);
+    if (!/^\d+$/.test(process.env.DISPLAY_INDEX)) throw new Error('DISPLAY_INDEX must be a non-negative integer');
+    const idx = Number(process.env.DISPLAY_INDEX);
     return idx === 0 ? undefined : idx - 1;
 })();
 
-/** Resolve which display to use: restricted env var takes priority, then explicit param, then undefined (primary). */
+/** Resolve which display to use: restricted env var takes priority; undefined means full desktop. */
 function resolveDisplay(requested?: number): number | undefined {
     if (RESTRICTED_DISPLAY !== undefined) return RESTRICTED_DISPLAY;
     return requested;
-}
-
-// ── Display-local coordinate helpers ────────────────────────────────────────
-
-/**
- * Top-left pixel offset of the currently active display in virtual desktop space.
- * Set by get_screenshot whenever a specific display is captured. Null = full desktop mode.
- */
-let restrictedDisplayOffset: { x: number; y: number } | null = null;
-
-/** Convert agent-space → physical screen coordinates, applying the active display offset. */
-function agentToScreen(ax: number, ay: number): { px: number; py: number } {
-    const result = _agentToScreen(ax, ay);
-    return restrictedDisplayOffset
-        ? { px: result.px + restrictedDisplayOffset.x, py: result.py + restrictedDisplayOffset.y }
-        : result;
-}
-
-/** Convert physical screen coordinates → agent-space, removing the active display offset. */
-function screenToAgent(px: number, py: number): { ax: number; ay: number } {
-    return restrictedDisplayOffset
-        ? _screenToAgent(px - restrictedDisplayOffset.x, py - restrictedDisplayOffset.y)
-        : _screenToAgent(px, py);
 }
 
 /** Read PNG width/height from the IHDR chunk without decoding pixel data. */
@@ -269,39 +251,52 @@ function captureWithRobotjs(): Buffer {
     return bitmapToPng(bitmap);
 }
 
-/** Fallback: try platform-specific tools (may produce higher quality / multi-monitor) */
-function captureWithExternalTools(display?: number): Promise<Buffer> {
+/** Capture using a backend whose pixel bounds can be verified. */
+function captureWithExternalTools(display?: number, bounds?: Rect): Promise<Buffer> {
     const os = platform();
     if (os === 'linux') return captureLinux(display);
-    if (os === 'win32') return captureWindows(display);
+    if (os === 'win32') return captureWindows(bounds!);
     if (os === 'darwin') return captureMac(display);
     return Promise.reject(new Error(`Unsupported platform: ${os}`));
 }
 
-/** Capture screenshot: try external tools first (multi-monitor), fall back to robotjs.
- *  When display is specified and robotjs fallback is used, the result is cropped
- *  to that display's region using geometry from xrandr / swaymsg / hyprctl.
- */
-async function captureScreenshot(display?: number): Promise<Buffer> {
-    try {
-        return await captureWithExternalTools(display);
-    } catch {
-        // External tools unavailable — robotjs always captures the full virtual desktop.
-        // Crop to the requested display's bounds when a specific display is requested.
-        const fullBuf = captureWithRobotjs();
-        if (display !== undefined && platform() === 'linux') {
-            const displays = await getLinuxDisplayGeometries();
-            const geom = displays[display];
-            if (geom) {
-                return cropPng(fullBuf, geom.x, geom.y, geom.width, geom.height);
-            }
-        }
-        return fullBuf;
+async function captureScreenshot(display?: number): Promise<{ buf: Buffer; bounds: Rect; layout: string }> {
+    const displays = await getDisplayGeometries();
+    if (!displays.length) throw new Error('Unable to determine display geometry.');
+    if (display !== undefined && (!Number.isInteger(display) || display < 0 || display >= displays.length)) {
+        throw new Error(`Display ${display} unavailable; valid indices are 0-${displays.length - 1}.`);
     }
+    const bounds = display === undefined ? unionBounds(displays) : displays[display];
+    const layout = JSON.stringify(displays);
+    let buf: Buffer;
+    try {
+        buf = await captureWithExternalTools(display, bounds);
+    } catch (externalError) {
+        // RobotJS captures from (0,0). It is only a safe fallback if that
+        // rectangle is exactly the requested capture, including its origin.
+        const size = robot.getScreenSize();
+        if (bounds.x !== 0 || bounds.y !== 0 || bounds.width !== size.width || bounds.height !== size.height) {
+            throw new Error(`Screenshot backend failed and RobotJS geometry does not match: ${(externalError as Error).message}`);
+        }
+        buf = captureWithRobotjs();
+    }
+    let dims = getPngDimensions(buf);
+    if (dims.width !== bounds.width || dims.height !== bounds.height) {
+        const size = robot.getScreenSize();
+        if (bounds.x === 0 && bounds.y === 0 && bounds.width === size.width && bounds.height === size.height) {
+            buf = captureWithRobotjs();
+            dims = getPngDimensions(buf);
+        }
+        if (dims.width !== bounds.width || dims.height !== bounds.height) {
+            throw new Error(`Screenshot is ${dims.width}×${dims.height}, but display geometry is ${bounds.width}×${bounds.height}. No coordinates were issued.`);
+        }
+    }
+    if (layout !== await currentLayoutId()) throw new Error('Display layout changed during capture. Retry the screenshot.');
+    return { buf, bounds, layout };
 }
 
 function captureLinux(display?: number): Promise<Buffer> {
-    const tmpFile = path.join(tmpdir(), `mcp-screenshot-${Date.now()}.png`);
+    const tmpFile = path.join(tmpdir(), `mcp-screenshot-${randomBytes(12).toString('hex')}.png`);
     return new Promise((resolve, reject) => {
         (async () => {
             // Resolve display geometry + output name from numeric index.
@@ -343,9 +338,11 @@ function captureLinux(display?: number): Promise<Buffer> {
                 try {
                     const fullBuf = await fs.readFile(tmpFile);
                     fs.unlink(tmpFile).catch(() => { });
-                    resolve(cropPng(fullBuf, geom.x, geom.y, geom.width, geom.height));
+                    const all = await getLinuxDisplayGeometries();
+                    const virtual = unionBounds(all);
+                    resolve(cropPng(fullBuf, geom.x - virtual.x, geom.y - virtual.y, geom.width, geom.height));
                     return;
-                } catch { /* fall through and return full screenshot */ }
+                } catch (err) { reject(err); return; }
             }
 
             readAndCleanup(tmpFile, resolve, reject);
@@ -353,21 +350,16 @@ function captureLinux(display?: number): Promise<Buffer> {
     });
 }
 
-function captureWindows(display?: number): Promise<Buffer> {
-    const tmpFile = path.join(tmpdir(), `mcp-screenshot-${Date.now()}.png`);
-    const displayIdx = display ?? 0;
+function captureWindows(bounds: Rect): Promise<Buffer> {
+    const tmpFile = path.join(tmpdir(), `mcp-screenshot-${randomBytes(12).toString('hex')}.png`);
     const psScript = `
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$screens = [System.Windows.Forms.Screen]::AllScreens
-$idx = ${displayIdx}
-if ($idx -ge $screens.Length) { $idx = 0 }
-$screen = $screens[$idx]
-$bounds = $screen.Bounds
-$bitmap = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+$bounds = [System.Drawing.Rectangle]::new(${bounds.x}, ${bounds.y}, ${bounds.width}, ${bounds.height})
+$bitmap = New-Object System.Drawing.Bitmap(${bounds.width}, ${bounds.height})
 $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
 $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-$bitmap.Save('${tmpFile.replace(/\\/g, '\\\\')}', [System.Drawing.Imaging.ImageFormat]::Png)
+$bitmap.Save('${tmpFile.replace(/'/g, "''")}', [System.Drawing.Imaging.ImageFormat]::Png)
 $graphics.Dispose()
 $bitmap.Dispose()
 `.trim();
@@ -381,8 +373,9 @@ $bitmap.Dispose()
 }
 
 function captureMac(display?: number): Promise<Buffer> {
-    const tmpFile = path.join(tmpdir(), `mcp-screenshot-${Date.now()}.png`);
-    const args = display !== undefined ? ['-D', String(display), tmpFile] : [tmpFile];
+    if (display !== undefined && display !== 0) return Promise.reject(new Error('Monitor selection on macOS requires a geometry-aware capture backend.'));
+    const tmpFile = path.join(tmpdir(), `mcp-screenshot-${randomBytes(12).toString('hex')}.png`);
+    const args = ['-x', tmpFile];
     return new Promise((resolve, reject) => {
         execFile('screencapture', args, { timeout: 15_000 }, (err) => {
             if (err) { reject(new Error(`screencapture failed: ${err.message}`)); return; }
@@ -402,19 +395,11 @@ function execFilePromise(cmd: string, args: string[], timeoutMs = 8_000): Promis
 
 interface DisplayGeometry { name: string; x: number; y: number; width: number; height: number; isPrimary: boolean; }
 
-let _displayGeomCache: { time: number; data: DisplayGeometry[] } | null = null;
-const DISPLAY_GEOM_CACHE_TTL_MS = 30_000;
-
 /**
  * Get per-display geometry sorted so that index 0 = primary display.
  * Tries xrandr (works on X11 and GNOME Wayland via XWayland), then swaymsg, then hyprctl.
- * Results are cached for 30 s to avoid redundant system calls.
  */
 async function getLinuxDisplayGeometries(): Promise<DisplayGeometry[]> {
-    const now = Date.now();
-    if (_displayGeomCache && now - _displayGeomCache.time < DISPLAY_GEOM_CACHE_TTL_MS) {
-        return _displayGeomCache.data;
-    }
 
     // xrandr: works on X11 and GNOME Wayland (via XWayland)
     // Line format: "HDMI-1 connected primary 1920x1080+0+0 ..."
@@ -423,13 +408,12 @@ async function getLinuxDisplayGeometries(): Promise<DisplayGeometry[]> {
         const displays: DisplayGeometry[] = [];
         for (const line of stdout.split('\n')) {
             // Capture the optional "primary" word so we can mark it
-            const m = /^(\S+)\s+connected\s+(primary\s+)?(\d+)x(\d+)\+(\d+)\+(\d+)/.exec(line);
+            const m = /^(\S+)\s+connected\s+(primary\s+)?(\d+)x(\d+)([+-]\d+)([+-]\d+)/.exec(line);
             if (m) displays.push({ name: m[1], isPrimary: !!m[2]?.trim(), width: +m[3], height: +m[4], x: +m[5], y: +m[6] });
         }
         if (displays.length > 0) {
             // Ensure the display marked "primary" is always at index 0
             displays.sort((a, b) => (b.isPrimary ? 1 : 0) - (a.isPrimary ? 1 : 0));
-            _displayGeomCache = { time: now, data: displays };
             return displays;
         }
     } catch { /* xrandr not available */ }
@@ -449,7 +433,6 @@ async function getLinuxDisplayGeometries(): Promise<DisplayGeometry[]> {
             }));
         if (result.length > 0) {
             result.sort((a, b) => (b.isPrimary ? 1 : 0) - (a.isPrimary ? 1 : 0));
-            _displayGeomCache = { time: now, data: result };
             return result;
         }
     } catch { /* swaymsg not available */ }
@@ -466,7 +449,6 @@ async function getLinuxDisplayGeometries(): Promise<DisplayGeometry[]> {
             height: (m.height ?? 0) as number,
         }));
         if (result.length > 0) {
-            _displayGeomCache = { time: now, data: result };
             return result;
         }
     } catch { /* hyprctl not available */ }
@@ -474,16 +456,62 @@ async function getLinuxDisplayGeometries(): Promise<DisplayGeometry[]> {
     return [];
 }
 
+function unionBounds(displays: Rect[]): Rect {
+    const x = Math.min(...displays.map(d => d.x));
+    const y = Math.min(...displays.map(d => d.y));
+    const right = Math.max(...displays.map(d => d.x + d.width));
+    const bottom = Math.max(...displays.map(d => d.y + d.height));
+    return { x, y, width: right - x, height: bottom - y };
+}
+
+async function getDisplayGeometries(): Promise<DisplayGeometry[]> {
+    if (platform() === 'linux') return getLinuxDisplayGeometries();
+    if (platform() === 'win32') {
+        const script = `Add-Type -AssemblyName System.Windows.Forms; @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object { [pscustomobject]@{ name=$_.DeviceName; x=$_.Bounds.X; y=$_.Bounds.Y; width=$_.Bounds.Width; height=$_.Bounds.Height; isPrimary=$_.Primary } }) | ConvertTo-Json -Compress`;
+        const stdout = await execFilePromise('powershell', ['-NoProfile', '-NonInteractive', '-Command', script]);
+        const result = JSON.parse(stdout) as DisplayGeometry | DisplayGeometry[];
+        const displays = Array.isArray(result) ? result : [result];
+        return displays.sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary));
+    }
+    if (platform() === 'darwin') {
+        if (await getDisplayCount() !== 1) throw new Error('Multi-monitor macOS geometry is unsupported; refusing to guess input coordinates.');
+        const { width, height } = robot.getScreenSize();
+        return [{ name: 'primary', x: 0, y: 0, width, height, isPrimary: true }];
+    }
+    throw new Error(`Unsupported platform: ${platform()}`);
+}
+
+async function currentLayoutId(): Promise<string> {
+    return JSON.stringify(await getDisplayGeometries());
+}
+
+async function getImageSpace(requestedDisplay?: number): Promise<ImageSpace> {
+    const displays = await getDisplayGeometries();
+    if (!displays.length) throw new Error('Unable to determine display geometry.');
+    const display = resolveDisplay(requestedDisplay);
+    if (display !== undefined && (!Number.isInteger(display) || display < 0 || display >= displays.length)) {
+        throw new Error(`Display ${display} unavailable; valid indices are 0-${displays.length - 1}.`);
+    }
+    const bounds = display === undefined ? unionBounds(displays) : displays[display];
+    return { bounds, ...imageSize(bounds.width, bounds.height) };
+}
+
+function assertCursorInSpace(space: ImageSpace, x: number, y: number): void {
+    if (x < space.bounds.x || y < space.bounds.y || x >= space.bounds.x + space.bounds.width || y >= space.bounds.y + space.bounds.height) {
+        throw new Error('Cursor is outside the selected display.');
+    }
+}
+
 /** Crop a PNG buffer to the given rectangle. */
 function cropPng(buf: Buffer, x: number, y: number, w: number, h: number): Buffer {
     const src = PNG.sync.read(buf);
-    // Clamp to source bounds
-    const cx = Math.max(0, x), cy = Math.max(0, y);
-    const cw = Math.min(w, src.width - cx), ch = Math.min(h, src.height - cy);
-    const dst = new PNG({ width: cw, height: ch });
-    for (let row = 0; row < ch; row++) {
-        const srcOff = ((cy + row) * src.width + cx) * 4;
-        src.data.copy(dst.data, row * cw * 4, srcOff, srcOff + cw * 4);
+    if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > src.width || y + h > src.height) {
+        throw new Error('Requested monitor does not fit within the captured desktop.');
+    }
+    const dst = new PNG({ width: w, height: h });
+    for (let row = 0; row < h; row++) {
+        const srcOff = ((y + row) * src.width + x) * 4;
+        src.data.copy(dst.data, row * w * 4, srcOff, srcOff + w * 4);
     }
     return PNG.sync.write(dst);
 }
@@ -502,13 +530,21 @@ async function readAndCleanup(filePath: string, resolve: (buf: Buffer) => void, 
 // MCP Server — Tool registration
 // ══════════════════════════════════════════════════════════════════════════════
 
+const PACKAGE_VERSION = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version;
 const server = new McpServer({
     name: 'Computer Controller',
-    version: '1.0.0',
+    version: PACKAGE_VERSION,
     title: 'Computer Controller',
     description: 'Desktop automation: launch apps, capture screenshots, control mouse and keyboard.',
-    icons: [{ src: 'https://unpkg.com/@cynosure-mcp/computer-controller@1.0.4/icon.png', mimeType: 'image/png' }],
+    icons: [{ src: `https://unpkg.com/@cynosure-mcp/computer-controller@${PACKAGE_VERSION}/icon.png`, mimeType: 'image/png' }],
 });
+
+server.registerResource('computer_controller_guide', GUIDE_URI, {
+    title: 'Computer Controller usage guide',
+    description: 'Screenshot coordinates and a practical computer-use workflow.',
+    mimeType: 'text/markdown',
+    annotations: { audience: ['assistant'], priority: 0.8 },
+}, async () => ({ contents: [{ uri: GUIDE_URI, mimeType: 'text/markdown', text: GUIDE }] }));
 
 // ── App launcher tools ──────────────────────────────────────────────────────
 
@@ -675,50 +711,27 @@ server.registerTool(
     'get_screenshot',
     {
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description:
-            'Capture a screenshot of the desktop. Call this after every action to verify the result before proceeding. ' +
-            'The screenshot is scaled to agent display resolution. All click/mouse coordinates must be in this agent display space.',
+        description: 'Capture the monitor under the cursor by default and return its image dimensions and display number. Pass the returned display number to mouse tools. WIDTH and HEIGHT optionally bound the image size.',
         inputSchema: {
-            display: z.number().int().min(0).optional().describe('Display/monitor number (0-indexed). Omit for the primary display.'),
+            display: z.number().int().min(-1).optional().describe('Display/monitor number (0 = primary, -1 = full desktop). Omit for the monitor under the cursor. DISPLAY_INDEX restrictions take priority.'),
             delay_ms: z.number().int().min(0).max(5000).default(2000)
                 .describe('Wait this many ms before capturing (default 2000). Pass 0 for an immediate snapshot before taking an action.'),
         },
     },
     async ({ display, delay_ms }) => {
         try {
-            const effectiveDisplay = resolveDisplay(display);
             if (delay_ms > 0) await new Promise(r => setTimeout(r, delay_ms));
-            const rawBuf = await captureScreenshot(effectiveDisplay);
-
-            // Scale to agent space.
-            // When a specific display is targeted we use per-display scale so that:
-            //   • The image fills a proper agent resolution (e.g. 1280×720 for a 1920×1080 display)
-            //   • Reported coordinate bounds match the image dimensions
-            //   • agentToScreen() correctly maps back to virtual-desktop coordinates
-            let scaledBuf: Buffer;
-            let info: ReturnType<typeof getScaleInfo>;
-            if (effectiveDisplay !== undefined) {
-                const dims = getPngDimensions(rawBuf); // O(1): reads PNG IHDR header only
-                const scaled = await scaleBufferForDisplay(rawBuf, dims.width, dims.height);
-                scaledBuf = scaled.buf;
-                info = scaled.info;
-                overrideScaleInfo(info); // keep validateCoords and all coordinate helpers in sync
-
-                // Determine display offset for virtual-desktop coordinate translation
-                const displayGeoms = await getLinuxDisplayGeometries();
-                const geom = displayGeoms[effectiveDisplay];
-                restrictedDisplayOffset = geom ? { x: geom.x, y: geom.y } : { x: 0, y: 0 };
-            } else {
-                scaledBuf = await scaleScreenshot(rawBuf);
-                info = getScaleInfo();
-                overrideScaleInfo(null); // revert to global full-desktop scale
-                restrictedDisplayOffset = null;
-            }
+            const effectiveDisplay = RESTRICTED_DISPLAY ?? (display === -1 ? undefined :
+                display ?? displayAtCursor(await getDisplayGeometries(), robot.getMousePos()));
+            const captured = await captureScreenshot(effectiveDisplay);
+            const scaled = await scaleScreenshot(captured.buf, captured.bounds.width, captured.bounds.height);
+            const space: ImageSpace = { bounds: captured.bounds, width: scaled.width, height: scaled.height };
 
             // Get current mouse position and draw crosshair on screenshot
             const mousePos = robot.getMousePos();
-            const { ax: mouseX, ay: mouseY } = screenToAgent(mousePos.x, mousePos.y);
-            const annotatedBuf = drawCursorCrosshair(scaledBuf, mouseX, mouseY);
+            const { ax: mouseX, ay: mouseY } = screenToAgent(space, mousePos.x, mousePos.y);
+            const annotatedBuf = mouseX >= 0 && mouseY >= 0 && mouseX < space.width && mouseY < space.height
+                ? drawCursorCrosshair(scaled.buf, mouseX, mouseY) : scaled.buf;
 
             const base64 = annotatedBuf.toString('base64');
             return {
@@ -726,10 +739,11 @@ server.registerTool(
                     { type: 'image' as const, data: base64, mimeType: 'image/png' },
                     {
                         type: 'text' as const,
-                        text: `Display: ${info.agentWidth}×${info.contentHeight} (agent space). ` +
-                            `Screen: ${info.screenWidth}×${info.screenHeight}. ` +
-                            `Mouse cursor: (${mouseX}, ${mouseY}). ` +
-                            `Use coordinates within [0, ${info.agentWidth}] × [0, ${info.contentHeight}].`
+                        text: `Image: ${space.width}×${space.height} pixels. ` +
+                            `Display: ${effectiveDisplay === undefined ? 'full desktop' : effectiveDisplay}. ` +
+                            `Valid coordinates: x=0..${space.width - 1}, y=0..${space.height - 1}. ` +
+                            `Cursor: (${mouseX}, ${mouseY})${mouseX < 0 || mouseY < 0 || mouseX >= space.width || mouseY >= space.height ? ' outside image' : ''}. ` +
+                            `Use the same display value for mouse tools.`
                     },
                 ]
             };
@@ -830,19 +844,21 @@ server.registerTool(
     {
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
         description:
-            'Move the mouse cursor to a position in agent display space (coordinates from the most recent screenshot). ' +
+            'Move the mouse cursor to a position in screenshot coordinates. Use the same display number as get_screenshot. ' +
             'After moving, take a screenshot to verify. Use smooth=true for a human-like gliding motion.',
         inputSchema: {
             x: z.number().int().describe('X coordinate in agent display space'),
             y: z.number().int().describe('Y coordinate in agent display space'),
+            display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop'),
             smooth: z.boolean().default(true).describe('Use smooth/humanized movement (default: true)'),
         },
     },
-    async ({ x, y, smooth }) => {
-        const err = validateCoords(x, y);
-        if (err) return { content: [{ type: 'text' as const, text: err }], isError: true };
+    async ({ x, y, smooth, display }) => {
         try {
-            const { px, py } = agentToScreen(x, y);
+            const space = await getImageSpace(display);
+            const error = validateCoords(space, x, y);
+            if (error) return { content: [{ type: 'text' as const, text: error }], isError: true };
+            const { px, py } = agentToScreen(space, x, y);
             if (smooth) {
                 robot.moveMouseSmooth(px, py);
             } else {
@@ -861,18 +877,21 @@ server.registerTool(
     {
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
         description:
-            'Click a mouse button at the current cursor position. ' +
+            'Click a mouse button at the current cursor position. Use the same display number as get_screenshot. ' +
             'Use move_mouse first to position the cursor, then get_cursor_area to verify placement, then click. ' +
             'Workflow: move_mouse → get_cursor_area → (refine if needed) → click_mouse.',
         inputSchema: {
             button: z.enum(['left', 'right', 'middle']).default('left').describe('Mouse button to click'),
+            display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop'),
         },
     },
-    async ({ button }) => {
+    async ({ button, display }) => {
         try {
+            const space = await getImageSpace(display);
             const pos = robot.getMousePos();
+            assertCursorInSpace(space, pos.x, pos.y);
             robot.mouseClick(button);
-            const { ax, ay } = screenToAgent(pos.x, pos.y);
+            const { ax, ay } = screenToAgent(space, pos.x, pos.y);
             return { content: [{ type: 'text' as const, text: `${button} clicked at (${ax}, ${ay}).` }] };
         } catch (err) {
             return { content: [{ type: 'text' as const, text: `Error clicking: ${(err as Error).message}` }], isError: true };
@@ -887,13 +906,15 @@ server.registerTool(
         description:
             'Double-click at the current cursor position. ' +
             'Use move_mouse first to position the cursor, then get_cursor_area to verify, then double_click.',
-        inputSchema: {},
+        inputSchema: { display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop') },
     },
-    async () => {
+    async ({ display }) => {
         try {
+            const space = await getImageSpace(display);
             const pos = robot.getMousePos();
+            assertCursorInSpace(space, pos.x, pos.y);
             robot.mouseClick('left', true);
-            const { ax, ay } = screenToAgent(pos.x, pos.y);
+            const { ax, ay } = screenToAgent(space, pos.x, pos.y);
             return { content: [{ type: 'text' as const, text: `Double-clicked at (${ax}, ${ay}).` }] };
         } catch (err) {
             return { content: [{ type: 'text' as const, text: `Error double-clicking: ${(err as Error).message}` }], isError: true };
@@ -914,22 +935,27 @@ server.registerTool(
             startY: z.number().int().describe('Start Y in agent display space'),
             endX: z.number().int().describe('End X in agent display space'),
             endY: z.number().int().describe('End Y in agent display space'),
+            display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop'),
         },
     },
-    async ({ startX, startY, endX, endY }) => {
-        const startErr = validateCoords(startX, startY);
-        if (startErr) return { content: [{ type: 'text' as const, text: `Start ${startErr}` }], isError: true };
-        const endErr = validateCoords(endX, endY);
-        if (endErr) return { content: [{ type: 'text' as const, text: `End ${endErr}` }], isError: true };
+    async ({ startX, startY, endX, endY, display }) => {
         try {
-            const start = agentToScreen(startX, startY);
-            const end = agentToScreen(endX, endY);
+            const space = await getImageSpace(display);
+            const startErr = validateCoords(space, startX, startY);
+            if (startErr) return { content: [{ type: 'text' as const, text: `Start ${startErr}` }], isError: true };
+            const endErr = validateCoords(space, endX, endY);
+            if (endErr) return { content: [{ type: 'text' as const, text: `End ${endErr}` }], isError: true };
+            const start = agentToScreen(space, startX, startY);
+            const end = agentToScreen(space, endX, endY);
             robot.moveMouseSmooth(start.px, start.py);
             await sleep(MOUSE_SETTLE_MS); // wait for move to complete before pressing down
             robot.mouseToggle('down', 'left');
-            robot.moveMouseSmooth(end.px, end.py);
-            await sleep(MOUSE_SETTLE_MS); // wait for drag move to complete before releasing
-            robot.mouseToggle('up', 'left');
+            try {
+                robot.moveMouseSmooth(end.px, end.py);
+                await sleep(MOUSE_SETTLE_MS);
+            } finally {
+                robot.mouseToggle('up', 'left');
+            }
             return { content: [{ type: 'text' as const, text: `Dragged (${startX}, ${startY}) → (${endX}, ${endY}).` }] };
         } catch (err) {
             return { content: [{ type: 'text' as const, text: `Error dragging: ${(err as Error).message}` }], isError: true };
@@ -950,15 +976,22 @@ server.registerTool(
             x: z.number().int().default(0).describe('Horizontal scroll amount (positive = right, negative = left)'),
             atX: z.number().int().optional().describe('Optional X in agent display space to move to before scrolling'),
             atY: z.number().int().optional().describe('Optional Y in agent display space to move to before scrolling'),
+            display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop'),
         },
     },
-    async ({ x, y, atX, atY }) => {
+    async ({ x, y, atX, atY, display }) => {
         try {
+            const space = await getImageSpace(display);
+            if ((atX === undefined) !== (atY === undefined)) throw new Error('Provide both atX and atY, or neither.');
             if (atX !== undefined && atY !== undefined) {
-                const coordErr = validateCoords(atX, atY);
+                const coordErr = validateCoords(space, atX, atY);
                 if (coordErr) return { content: [{ type: 'text' as const, text: coordErr }], isError: true };
-                const { px, py } = agentToScreen(atX, atY);
+                const { px, py } = agentToScreen(space, atX, atY);
                 robot.moveMouseSmooth(px, py);
+                await sleep(MOUSE_SETTLE_MS);
+            } else {
+                const pos = robot.getMousePos();
+                assertCursorInSpace(space, pos.x, pos.y);
             }
             robot.scrollMouse(x, y);
             return { content: [{ type: 'text' as const, text: `Scrolled (x: ${x}, y: ${y})${atX !== undefined ? ` at (${atX}, ${atY})` : ''}.` }] };
@@ -972,12 +1005,14 @@ server.registerTool(
     'get_mouse_position',
     {
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description: 'Get the current mouse cursor position in agent display space.',
+        description: 'Get the current mouse cursor position in screenshot coordinates for the selected display.',
+        inputSchema: { display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop') },
     },
-    async () => {
+    async ({ display }) => {
         try {
+            const space = await getImageSpace(display);
             const pos = robot.getMousePos();
-            const { ax, ay } = screenToAgent(pos.x, pos.y);
+            const { ax, ay } = screenToAgent(space, pos.x, pos.y);
             return { content: [{ type: 'text' as const, text: `Mouse position: (${ax}, ${ay}) in agent display space.` }] };
         } catch (err) {
             return { content: [{ type: 'text' as const, text: `Error getting mouse position: ${(err as Error).message}` }], isError: true };
@@ -1190,26 +1225,20 @@ server.registerTool(
     'get_screen_size',
     {
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description: 'Get the agent display resolution and physical screen resolution. Mouse/click coordinates use agent display space.',
+        description: 'Get physical display geometry and configured screenshot size limits. Use get_screenshot for actual image dimensions.',
     },
     async () => {
         try {
-            const info = getScaleInfo();
-            const restrictionNote = RESTRICTED_DISPLAY !== undefined
-                ? `\nDisplay restricted to monitor ${RESTRICTED_DISPLAY}.`
-                : '';
-            const geminiNote = GEMINI_MODE
-                ? `\nGemini mode: image is ${info.agentWidth}×${info.agentHeight} with content area ${info.agentWidth}×${info.contentHeight}. Click coordinates must be within content area.`
-                : '';
+            const displays = await getDisplayGeometries();
+            const bounds = unionBounds(displays);
             return {
                 content: [{
                     type: 'text' as const,
                     text:
-                        `Agent display: ${info.agentWidth}×${info.contentHeight} px — USE THESE for click coordinates.\n` +
-                        `Physical screen: ${info.screenWidth}×${info.screenHeight} px (handled internally).\n` +
-                        `Scale factor: ${info.scaleX.toFixed(3)}.` +
-                        restrictionNote +
-                        geminiNote
+                        `Virtual desktop: ${bounds.width}×${bounds.height} at (${bounds.x}, ${bounds.y}).\n` +
+                        `Displays: ${displays.map((d, i) => `${i}:${d.name} ${d.width}×${d.height} at (${d.x},${d.y})`).join('; ')}.\n` +
+                        `Screenshot limits: WIDTH=${MAX_WIDTH ?? 'unbounded'}, HEIGHT=${MAX_HEIGHT ?? 'unbounded'}. ` +
+                        `Take a screenshot for its actual image dimensions.`
                 }]
             };
         } catch (err) {
@@ -1274,26 +1303,27 @@ server.registerTool(
     {
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description:
-            `Capture a ${GEMINI_MODE ? '1000×1000' : '512×512'} screenshot centred on the current mouse cursor at full (native) resolution, ` +
+            'Capture a 512×512 screenshot centred on the current mouse cursor at full (native) resolution, ' +
             'with a red crosshair overlay marking the exact cursor position. ' +
             'Useful for inspecting the precise area around the cursor: reading small text, verifying click targets, or confirming hover states. ' +
             'Returns the screenshot plus the cursor coordinates in agent display space.',
-        inputSchema: {},
+        inputSchema: { display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop') },
     },
-    async () => {
+    async ({ display }) => {
         try {
-            const SIZE = GEMINI_MODE ? 1000 : 512;
+            const space = await getImageSpace(display);
+            const SIZE = 512;
             const HALF = SIZE / 2;
 
             // 1. Get cursor position in physical screen coordinates
             const mousePos = robot.getMousePos();
+            assertCursorInSpace(space, mousePos.x, mousePos.y);
 
             // 2. Determine capture region, clamped to screen bounds
-            const screenSize = robot.getScreenSize();
-            const left = Math.max(0, mousePos.x - HALF);
-            const top = Math.max(0, mousePos.y - HALF);
-            const right = Math.min(screenSize.width, mousePos.x + HALF);
-            const bottom = Math.min(screenSize.height, mousePos.y + HALF);
+            const left = Math.max(space.bounds.x, mousePos.x - HALF);
+            const top = Math.max(space.bounds.y, mousePos.y - HALF);
+            const right = Math.min(space.bounds.x + space.bounds.width, mousePos.x + HALF);
+            const bottom = Math.min(space.bounds.y + space.bounds.height, mousePos.y + HALF);
             const captureW = right - left;
             const captureH = bottom - top;
 
@@ -1301,9 +1331,10 @@ server.registerTool(
                 return { content: [{ type: 'text' as const, text: 'Cursor is outside screen bounds.' }], isError: true };
             }
 
-            // 3. Capture the region at full resolution
-            const bitmap = robot.screen.capture(left, top, captureW, captureH);
-            let pngBuf = bitmapToPng(bitmap);
+            // 3. Capture with the same verified backend and geometry as get_screenshot.
+            const captured = await captureScreenshot(resolveDisplay(display));
+            if (captured.bounds.x !== space.bounds.x || captured.bounds.y !== space.bounds.y || captured.bounds.width !== space.bounds.width || captured.bounds.height !== space.bounds.height) throw new Error('Display layout changed. Take a new screenshot.');
+            let pngBuf = cropPng(captured.buf, left - captured.bounds.x, top - captured.bounds.y, captureW, captureH);
 
             // 4. If capture is smaller than 512×512 (cursor near edge), paste into a 512×512 canvas
             if (captureW < SIZE || captureH < SIZE) {
@@ -1338,7 +1369,7 @@ server.registerTool(
             const annotated = drawCursorCrosshair(pngBuf, cursorInImageX, cursorInImageY);
 
             // 7. Report coordinates in agent display space
-            const { ax, ay } = screenToAgent(mousePos.x, mousePos.y);
+            const { ax, ay } = screenToAgent(space, mousePos.x, mousePos.y);
 
             return {
                 content: [

@@ -1,7 +1,7 @@
 {
   "name": "@cynosure-mcp/computer-controller",
   "mcpName": "io.github.andreasjhagen/computer-controller",
-  "version": "1.0.4",
+  "version": "2.0.0",
   "description": "MCP server for desktop automation: launch apps, capture screenshots, control mouse and keyboard",
   "type": "module",
   "main": "dist/index.js",
@@ -10,6 +10,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "test": "npm run build && node --test test/*.test.mjs",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "release:check": "node scripts/sync-version.mjs --check",

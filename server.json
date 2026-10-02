@@ -2,10 +2,10 @@
     "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
     "name": "io.github.andreasjhagen/computer-controller",
     "description": "MCP server for desktop automation: launch apps, capture screenshots, control mouse and keyboard",
-    "version": "1.0.4",
+    "version": "2.0.0",
     "icons": [
         {
-            "src": "https://unpkg.com/@cynosure-mcp/computer-controller@1.0.4/icon.png",
+            "src": "https://unpkg.com/@cynosure-mcp/computer-controller@2.0.0/icon.png",
             "mimeType": "image/png"
         }
     ],
@@ -13,23 +13,30 @@
         {
             "registryType": "npm",
             "identifier": "@cynosure-mcp/computer-controller",
-            "version": "1.0.4",
+            "version": "2.0.0",
             "transport": {
                 "type": "stdio"
             },
             "environmentVariables": [
                 {
                     "name": "DISPLAY_INDEX",
-                    "description": "Restrict all screenshot and display operations to this specific monitor (0-indexed). Leave empty to allow access to all displays.",
+                    "description": "Restrict screenshots to a monitor: 0 or unset = full desktop, 1 = primary monitor, 2 = second monitor.",
                     "isRequired": false,
                     "format": "number",
                     "isSecret": false
                 },
                 {
-                    "name": "GEMINI_MODE",
-                    "description": "Set to 'true' to scale screenshots to 1000×1000 (letterboxed) for Gemini's native coordinate system.",
+                    "name": "WIDTH",
+                    "description": "Optional maximum screenshot width in pixels. Images retain aspect ratio and are not padded.",
                     "isRequired": false,
-                    "format": "boolean",
+                    "format": "number",
+                    "isSecret": false
+                },
+                {
+                    "name": "HEIGHT",
+                    "description": "Optional maximum screenshot height in pixels. Images retain aspect ratio and are not padded.",
+                    "isRequired": false,
+                    "format": "number",
                     "isSecret": false
                 }
             ]
