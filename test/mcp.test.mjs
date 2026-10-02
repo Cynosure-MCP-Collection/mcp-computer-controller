@@ -11,7 +11,7 @@ test('guide resource and display-based mouse contract are exposed over MCP', asy
         const resources = await client.listResources();
         assert.ok(resources.resources.some(resource => resource.uri === 'computer-controller://guide'));
         const guide = await client.readResource({ uri: 'computer-controller://guide' });
-        assert.match(guide.contents[0].text, /same display number/i);
+        assert.match(guide.contents[0].text, /Pass the returned display number to mouse and cursor-area tools/i);
         const listed = await client.listTools();
         const screenshot = listed.tools.find(tool => tool.name === 'get_screenshot');
         assert.equal(screenshot.inputSchema.properties.display.minimum, -1);
