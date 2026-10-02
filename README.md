@@ -41,17 +41,17 @@ The server also exposes the MCP resource `computer-controller://guide` with its 
 
 ### Screenshot coordinates
 
-Call `get_screenshot` first. Its text result contains the actual image dimensions and the selected display. Coordinates are zero-based pixels in **that image**. If you captured `display: 0`, pass `display: 0` to mouse tools. If you omitted `display` to capture the full desktop, omit it on mouse tools too. Screenshot and mouse tools independently compute the same mapping from the current display geometry and `WIDTH`/`HEIGHT` limits; no token or global "current display" setting is needed.
+Call `get_screenshot` first. Its text result contains the actual image dimensions and the selected display. Coordinates are zero-based pixels in **that image**. By default, the screenshot captures the monitor under the cursor. Pass the display number returned by the screenshot to mouse tools. If you captured `display: -1` for the full desktop, omit `display` on mouse tools. Screenshot and mouse tools independently compute the same mapping from the current display geometry and `WIDTH`/`HEIGHT` limits; no token or global "current display" setting is needed.
 
 **Version 2 migration:** `GEMINI_MODE` and `sys_prompt_template.txt` were removed; use `WIDTH`/`HEIGHT` and the guide resource. Without size limits, screenshots use native capture dimensions. Mouse tools accept an optional `display` number.
 
-Omitting `display` captures the full desktop. `display: 0` selects the primary monitor, `display: 1` the next monitor. A failed monitor capture returns an error; it never returns a different monitor or the full desktop as a successful result. Capture backends are checked against their expected pixel dimensions. On macOS, multi-monitor capture currently fails closed until a geometry-aware backend is available.
+Omitting `display` captures the monitor under the cursor at capture time. `display: -1` captures the full desktop. `display: 0` selects the primary monitor, `display: 1` the next monitor. A failed monitor capture returns an error; it never returns a different monitor or the full desktop as a successful result. Capture backends are checked against their expected pixel dimensions. On macOS, multi-monitor capture currently fails closed until a geometry-aware backend is available.
 
 ## Configuration
 
 | Variable        | Required | Description                                                                                            |
 | --------------- | -------- | ------------------------------------------------------------------------------------------------------ |
-| `DISPLAY_INDEX` | No | Restrict screenshots to a monitor: `0` or unset = all displays; `1` = primary; `2` = second display. |
+| `DISPLAY_INDEX` | No | Restrict screenshots to a monitor: `0` or unset = no restriction (screenshots default to the cursor monitor); `1` = primary; `2` = second display. |
 | `WIDTH` | No | Maximum screenshot width in pixels (1–16384). |
 | `HEIGHT` | No | Maximum screenshot height in pixels (1–16384). |
 

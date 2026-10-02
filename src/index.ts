@@ -12,6 +12,7 @@ import robot from '@hurdlegroup/robotjs';
 import { PNG } from 'pngjs';
 import { scaleScreenshot, imageSize, agentToScreen, screenToAgent, validateCoords, MAX_WIDTH, MAX_HEIGHT, type ImageSpace, type Rect } from './scaling.js';
 import { GUIDE, GUIDE_URI } from './guide.js';
+import { displayAtCursor } from './displays.js';
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Display restriction
@@ -710,17 +711,18 @@ server.registerTool(
     'get_screenshot',
     {
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description: 'Capture the desktop and return its image dimensions. Pass the same display number to mouse tools. WIDTH and HEIGHT optionally bound the image size.',
+        description: 'Capture the monitor under the cursor by default and return its image dimensions and display number. Pass the returned display number to mouse tools. WIDTH and HEIGHT optionally bound the image size.',
         inputSchema: {
-            display: z.number().int().min(0).optional().describe('Display/monitor number (0 = primary). Omit for the full desktop.'),
+            display: z.number().int().min(-1).optional().describe('Display/monitor number (0 = primary, -1 = full desktop). Omit for the monitor under the cursor. DISPLAY_INDEX restrictions take priority.'),
             delay_ms: z.number().int().min(0).max(5000).default(2000)
                 .describe('Wait this many ms before capturing (default 2000). Pass 0 for an immediate snapshot before taking an action.'),
         },
     },
     async ({ display, delay_ms }) => {
         try {
-            const effectiveDisplay = resolveDisplay(display);
             if (delay_ms > 0) await new Promise(r => setTimeout(r, delay_ms));
+            const effectiveDisplay = RESTRICTED_DISPLAY ?? (display === -1 ? undefined :
+                display ?? displayAtCursor(await getDisplayGeometries(), robot.getMousePos()));
             const captured = await captureScreenshot(effectiveDisplay);
             const scaled = await scaleScreenshot(captured.buf, captured.bounds.width, captured.bounds.height);
             const space: ImageSpace = { bounds: captured.bounds, width: scaled.width, height: scaled.height };
