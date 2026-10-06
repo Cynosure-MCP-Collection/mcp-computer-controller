@@ -51,6 +51,10 @@ Screenshot and mouse tools compute the same mapping from the current display geo
 
 **Version 2 migration:** `GEMINI_MODE` and `sys_prompt_template.txt` were removed; use `WIDTH`/`HEIGHT` and the guide resource. Without size limits, screenshots use native capture dimensions.
 
+### Typing on Linux
+
+`type_text` follows the active keyboard layout, so symbols like `/ ? = @` type correctly on non-US layouts. On X11 it uses `xdotool` if installed, otherwise built-in XTest input (needs `libXtst`, present on most desktops). On Wayland, install `wl-clipboard` so text can be pasted.
+
 ## Configuration
 
 | Variable        | Required | Description                                                                                            |

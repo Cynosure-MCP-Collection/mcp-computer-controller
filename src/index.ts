@@ -13,6 +13,7 @@ import { PNG } from 'pngjs';
 import { scaleScreenshot, imageSize, agentToScreen, screenToAgent, validateCoords, MAX_WIDTH, MAX_HEIGHT, type ImageSpace, type Rect } from './scaling.js';
 import { GUIDE, GUIDE_URI } from './guide.js';
 import { displayAtCursor, DisplaySelection, describeDisplays, neighbor, type Side } from './displays.js';
+import { typeViaXTest } from './xtest.js';
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Display restriction
@@ -816,8 +817,11 @@ function sleep(ms: number): Promise<void> {
     return new Promise(r => setTimeout(r, ms));
 }
 
-/** Type text by copying to clipboard and pasting — works with any keyboard layout. */
-async function typeViaClipboard(text: string): Promise<void> {
+/** robotjs' X11 typeString assumes a US keymap and never presses Shift for symbols. */
+const ROBOT_SAFE_TEXT = /^[A-Za-z0-9 \n\t]*$/;
+
+/** Type text into the focused control, respecting the active keyboard layout. */
+async function typeText(text: string): Promise<void> {
     const os = platform();
 
     if (os === 'linux') {
@@ -826,6 +830,14 @@ async function typeViaClipboard(text: string): Promise<void> {
             await runCmdInput(text, 'xdotool type --delay 0 --clearmodifiers --file -');
             return;
         } catch { /* xdotool not available */ }
+
+        // Built-in XTest typing (same technique as xdotool, needs libXtst and the koffi package)
+        if (process.env.DISPLAY) {
+            try {
+                await typeViaXTest(text);
+                return;
+            } catch { /* not available */ }
+        }
 
         // Try clipboard tools: xclip → xsel → wl-copy
         const clipboardTools = [
@@ -846,7 +858,9 @@ async function typeViaClipboard(text: string): Promise<void> {
             } catch { /* try next tool */ }
         }
 
-        // Final fallback
+        if (!ROBOT_SAFE_TEXT.test(text)) {
+            throw new Error('No layout-aware typing method available. Install xdotool (X11) or wl-clipboard (Wayland).');
+        }
         robot.typeString(text);
     } else if (os === 'darwin') {
         const saved = await runCmd('pbpaste').catch(() => null);
@@ -1078,7 +1092,7 @@ server.registerTool(
     },
     async ({ text }) => {
         try {
-            await typeViaClipboard(text);
+            await typeText(text);
             return { content: [{ type: 'text' as const, text: `Typed ${text.length} characters.` }] };
         } catch (err) {
             return { content: [{ type: 'text' as const, text: `Error typing: ${(err as Error).message}` }], isError: true };
