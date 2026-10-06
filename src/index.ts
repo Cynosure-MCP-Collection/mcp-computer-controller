@@ -12,7 +12,7 @@ import robot from '@hurdlegroup/robotjs';
 import { PNG } from 'pngjs';
 import { scaleScreenshot, imageSize, agentToScreen, screenToAgent, validateCoords, MAX_WIDTH, MAX_HEIGHT, type ImageSpace, type Rect } from './scaling.js';
 import { GUIDE, GUIDE_URI } from './guide.js';
-import { displayAtCursor } from './displays.js';
+import { displayAtCursor, DisplaySelection, describeDisplays, neighbor, type Side } from './displays.js';
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Display restriction
@@ -32,11 +32,8 @@ const RESTRICTED_DISPLAY: number | undefined = (() => {
     return idx === 0 ? undefined : idx - 1;
 })();
 
-/** Resolve which display to use: restricted env var takes priority; undefined means full desktop. */
-function resolveDisplay(requested?: number): number | undefined {
-    if (RESTRICTED_DISPLAY !== undefined) return RESTRICTED_DISPLAY;
-    return requested;
-}
+/** The display tools use when called without one: primary at start, then the last one passed. */
+const selection = new DisplaySelection(RESTRICTED_DISPLAY);
 
 /** Read PNG width/height from the IHDR chunk without decoding pixel data. */
 function getPngDimensions(buf: Buffer): { width: number; height: number } {
@@ -485,21 +482,71 @@ async function currentLayoutId(): Promise<string> {
     return JSON.stringify(await getDisplayGeometries());
 }
 
-async function getImageSpace(requestedDisplay?: number): Promise<ImageSpace> {
+/** A resolved coordinate space: the selected display (undefined = full desktop) and its image mapping. */
+interface Selected { space: ImageSpace; display: number | undefined; displays: DisplayGeometry[] }
+
+async function getImageSpace(requestedDisplay?: number): Promise<Selected> {
     const displays = await getDisplayGeometries();
     if (!displays.length) throw new Error('Unable to determine display geometry.');
-    const display = resolveDisplay(requestedDisplay);
-    if (display !== undefined && (!Number.isInteger(display) || display < 0 || display >= displays.length)) {
-        throw new Error(`Display ${display} unavailable; valid indices are 0-${displays.length - 1}.`);
-    }
+    const display = selection.resolve(requestedDisplay, displays.length);
     const bounds = display === undefined ? unionBounds(displays) : displays[display];
-    return { bounds, ...imageSize(bounds.width, bounds.height) };
+    return { space: { bounds, ...imageSize(bounds.width, bounds.height) }, display, displays };
 }
 
-function assertCursorInSpace(space: ImageSpace, x: number, y: number): void {
-    if (x < space.bounds.x || y < space.bounds.y || x >= space.bounds.x + space.bounds.width || y >= space.bounds.y + space.bounds.height) {
-        throw new Error('Cursor is outside the selected display.');
+function spaceLabel(display: number | undefined, displays: DisplayGeometry[]): string {
+    if (display === undefined) return 'the full desktop';
+    return `display ${display}${displays[display]?.isPrimary ? ' (primary)' : ''}`;
+}
+
+/** Describe which display a physical point is on, for messages. */
+function locatePoint(displays: DisplayGeometry[], x: number, y: number): string {
+    try { return `on display ${displayAtCursor(displays, { x, y })}`; } catch { return 'outside the known displays'; }
+}
+
+function cursorInSpace(space: ImageSpace, x: number, y: number): boolean {
+    return x >= space.bounds.x && y >= space.bounds.y && x < space.bounds.x + space.bounds.width && y < space.bounds.y + space.bounds.height;
+}
+
+function assertCursorInSpace({ space, display, displays }: Selected, x: number, y: number): void {
+    if (cursorInSpace(space, x, y)) return;
+    let other: number | undefined;
+    try { other = displayAtCursor(displays, { x, y }); } catch { /* outside all displays */ }
+    throw new Error(`Cursor is ${locatePoint(displays, x, y)}, not on the current ${spaceLabel(display, displays)}. ` +
+        `Pass x,y to act on the current display${other === undefined ? '' : `, or pass display=${other} to act where the cursor is`}.`);
+}
+
+const SIDE_TEXT: Record<Side, string> = { left: 'to the left', right: 'to the right', up: 'above', down: 'below' };
+
+/** validateCoords plus a hint naming the monitor beyond the edge the agent overshot. */
+function coordsError({ space, display, displays }: Selected, x: number, y: number): string | null {
+    const error = validateCoords(space, x, y);
+    if (!error || display === undefined || displays.length < 2) return error;
+    const side: Side | undefined = x >= space.width ? 'right' : x < 0 ? 'left' : y >= space.height ? 'down' : y < 0 ? 'up' : undefined;
+    const next = side === undefined ? undefined : neighbor(displays, display, side);
+    if (side === undefined || next === undefined) return `${error} Coordinates refer to ${spaceLabel(display, displays)}.`;
+    return `${error} Coordinates refer to ${spaceLabel(display, displays)}. Display ${next} is ${SIDE_TEXT[side]}; call get_screenshot with display=${next} to work there.`;
+}
+
+/** Move to (x, y) when given; otherwise require the cursor to be on the selected display. */
+async function positionCursor(sel: Selected, x: number | undefined, y: number | undefined, names = 'x and y'): Promise<{ ax: number; ay: number }> {
+    if ((x === undefined) !== (y === undefined)) throw new Error(`Provide both ${names}, or neither.`);
+    if (x !== undefined && y !== undefined) {
+        const error = coordsError(sel, x, y);
+        if (error) throw new Error(error);
+        const { px, py } = agentToScreen(sel.space, x, y);
+        robot.moveMouseSmooth(px, py);
+        await sleep(MOUSE_SETTLE_MS);
+        return { ax: x, ay: y };
     }
+    const pos = robot.getMousePos();
+    assertCursorInSpace(sel, pos.x, pos.y);
+    return screenToAgent(sel.space, pos.x, pos.y);
+}
+
+/** Schema for the display argument shared by mouse and cursor tools. */
+function displayArg() {
+    return z.number().int().min(-1).optional().describe(
+        'Display number (-1 = full desktop). Omit to use the current display: the primary at start, then whichever display was last passed to any tool.');
 }
 
 /** Crop a PNG buffer to the given rectangle. */
@@ -711,9 +758,10 @@ server.registerTool(
     'get_screenshot',
     {
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description: 'Capture the monitor under the cursor by default and return its image dimensions and display number. Pass the returned display number to mouse tools. WIDTH and HEIGHT optionally bound the image size.',
+        description: 'Capture the current display (the primary by default) and return its image dimensions and the other displays\' positions. ' +
+            'The captured display becomes current: mouse tools called without display use its coordinates. WIDTH and HEIGHT optionally bound the image size.',
         inputSchema: {
-            display: z.number().int().min(-1).optional().describe('Display/monitor number (0 = primary, -1 = full desktop). Omit for the monitor under the cursor. DISPLAY_INDEX restrictions take priority.'),
+            display: z.number().int().min(-1).optional().describe('Display number (0 = primary, -1 = full desktop). Omit to capture the current display: the primary at start, then whichever display was last passed to any tool. DISPLAY_INDEX restrictions take priority.'),
             delay_ms: z.number().int().min(0).max(5000).default(2000)
                 .describe('Wait this many ms before capturing (default 2000). Pass 0 for an immediate snapshot before taking an action.'),
         },
@@ -721,8 +769,7 @@ server.registerTool(
     async ({ display, delay_ms }) => {
         try {
             if (delay_ms > 0) await new Promise(r => setTimeout(r, delay_ms));
-            const effectiveDisplay = RESTRICTED_DISPLAY ?? (display === -1 ? undefined :
-                display ?? displayAtCursor(await getDisplayGeometries(), robot.getMousePos()));
+            const { display: effectiveDisplay, displays } = await getImageSpace(display);
             const captured = await captureScreenshot(effectiveDisplay);
             const scaled = await scaleScreenshot(captured.buf, captured.bounds.width, captured.bounds.height);
             const space: ImageSpace = { bounds: captured.bounds, width: scaled.width, height: scaled.height };
@@ -730,20 +777,23 @@ server.registerTool(
             // Get current mouse position and draw crosshair on screenshot
             const mousePos = robot.getMousePos();
             const { ax: mouseX, ay: mouseY } = screenToAgent(space, mousePos.x, mousePos.y);
-            const annotatedBuf = mouseX >= 0 && mouseY >= 0 && mouseX < space.width && mouseY < space.height
-                ? drawCursorCrosshair(scaled.buf, mouseX, mouseY) : scaled.buf;
+            const cursorVisible = cursorInSpace(space, mousePos.x, mousePos.y);
+            const annotatedBuf = cursorVisible ? drawCursorCrosshair(scaled.buf, mouseX, mouseY) : scaled.buf;
 
+            const label = spaceLabel(effectiveDisplay, displays);
+            const layout = displays.length < 2 ? '' : RESTRICTED_DISPLAY !== undefined
+                ? ` Displays: ${describeDisplays(displays, effectiveDisplay)}. DISPLAY_INDEX fixes the display.`
+                : ` Displays: ${describeDisplays(displays, effectiveDisplay)}. Pass display=N to switch, or -1 for the full desktop.`;
             const base64 = annotatedBuf.toString('base64');
             return {
                 content: [
                     { type: 'image' as const, data: base64, mimeType: 'image/png' },
                     {
                         type: 'text' as const,
-                        text: `Image: ${space.width}×${space.height} pixels. ` +
-                            `Display: ${effectiveDisplay === undefined ? 'full desktop' : effectiveDisplay}. ` +
+                        text: `Image: ${space.width}×${space.height} pixels of ${label}, now the current display; mouse tools without display use these coordinates. ` +
                             `Valid coordinates: x=0..${space.width - 1}, y=0..${space.height - 1}. ` +
-                            `Cursor: (${mouseX}, ${mouseY})${mouseX < 0 || mouseY < 0 || mouseX >= space.width || mouseY >= space.height ? ' outside image' : ''}. ` +
-                            `Use the same display value for mouse tools.`
+                            `Cursor: ${cursorVisible ? `(${mouseX}, ${mouseY})` : locatePoint(displays, mousePos.x, mousePos.y)}.` +
+                            layout
                     },
                 ]
             };
@@ -844,28 +894,28 @@ server.registerTool(
     {
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
         description:
-            'Move the mouse cursor to a position in screenshot coordinates. Use the same display number as get_screenshot. ' +
+            'Move the mouse cursor to a position in screenshot coordinates of the current display (or the display passed). ' +
             'After moving, take a screenshot to verify. Use smooth=true for a human-like gliding motion.',
         inputSchema: {
-            x: z.number().int().describe('X coordinate in agent display space'),
-            y: z.number().int().describe('Y coordinate in agent display space'),
-            display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop'),
+            x: z.number().int().describe('X coordinate in screenshot pixels'),
+            y: z.number().int().describe('Y coordinate in screenshot pixels'),
+            display: displayArg(),
             smooth: z.boolean().default(true).describe('Use smooth/humanized movement (default: true)'),
         },
     },
     async ({ x, y, smooth, display }) => {
         try {
-            const space = await getImageSpace(display);
-            const error = validateCoords(space, x, y);
+            const sel = await getImageSpace(display);
+            const error = coordsError(sel, x, y);
             if (error) return { content: [{ type: 'text' as const, text: error }], isError: true };
-            const { px, py } = agentToScreen(space, x, y);
+            const { px, py } = agentToScreen(sel.space, x, y);
             if (smooth) {
                 robot.moveMouseSmooth(px, py);
             } else {
                 robot.moveMouse(px, py);
             }
             await sleep(MOUSE_SETTLE_MS); // let the move complete before returning
-            return { content: [{ type: 'text' as const, text: `Mouse moved to (${x}, ${y})${smooth ? ' smoothly' : ''}.` }] };
+            return { content: [{ type: 'text' as const, text: `Mouse moved to (${x}, ${y}) on ${spaceLabel(sel.display, sel.displays)}${smooth ? ' smoothly' : ''}.` }] };
         } catch (err) {
             return { content: [{ type: 'text' as const, text: `Error moving mouse: ${(err as Error).message}` }], isError: true };
         }
@@ -877,22 +927,21 @@ server.registerTool(
     {
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
         description:
-            'Click a mouse button at the current cursor position. Use the same display number as get_screenshot. ' +
-            'Use move_mouse first to position the cursor, then get_cursor_area to verify placement, then click. ' +
-            'Workflow: move_mouse → get_cursor_area → (refine if needed) → click_mouse.',
+            'Click a mouse button at (x, y) in screenshot coordinates of the current display, or at the current cursor position if x and y are omitted. ' +
+            'For small or uncertain targets: move_mouse → get_cursor_area → (refine if needed) → click_mouse without x and y.',
         inputSchema: {
+            x: z.number().int().optional().describe('X in screenshot pixels; omit together with y to click at the cursor'),
+            y: z.number().int().optional().describe('Y in screenshot pixels; omit together with x to click at the cursor'),
             button: z.enum(['left', 'right', 'middle']).default('left').describe('Mouse button to click'),
-            display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop'),
+            display: displayArg(),
         },
     },
-    async ({ button, display }) => {
+    async ({ x, y, button, display }) => {
         try {
-            const space = await getImageSpace(display);
-            const pos = robot.getMousePos();
-            assertCursorInSpace(space, pos.x, pos.y);
+            const sel = await getImageSpace(display);
+            const { ax, ay } = await positionCursor(sel, x, y);
             robot.mouseClick(button);
-            const { ax, ay } = screenToAgent(space, pos.x, pos.y);
-            return { content: [{ type: 'text' as const, text: `${button} clicked at (${ax}, ${ay}).` }] };
+            return { content: [{ type: 'text' as const, text: `${button} clicked at (${ax}, ${ay}) on ${spaceLabel(sel.display, sel.displays)}.` }] };
         } catch (err) {
             return { content: [{ type: 'text' as const, text: `Error clicking: ${(err as Error).message}` }], isError: true };
         }
@@ -904,18 +953,19 @@ server.registerTool(
     {
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
         description:
-            'Double-click at the current cursor position. ' +
-            'Use move_mouse first to position the cursor, then get_cursor_area to verify, then double_click.',
-        inputSchema: { display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop') },
+            'Double-click at (x, y) in screenshot coordinates of the current display, or at the current cursor position if x and y are omitted.',
+        inputSchema: {
+            x: z.number().int().optional().describe('X in screenshot pixels; omit together with y to double-click at the cursor'),
+            y: z.number().int().optional().describe('Y in screenshot pixels; omit together with x to double-click at the cursor'),
+            display: displayArg(),
+        },
     },
-    async ({ display }) => {
+    async ({ x, y, display }) => {
         try {
-            const space = await getImageSpace(display);
-            const pos = robot.getMousePos();
-            assertCursorInSpace(space, pos.x, pos.y);
+            const sel = await getImageSpace(display);
+            const { ax, ay } = await positionCursor(sel, x, y);
             robot.mouseClick('left', true);
-            const { ax, ay } = screenToAgent(space, pos.x, pos.y);
-            return { content: [{ type: 'text' as const, text: `Double-clicked at (${ax}, ${ay}).` }] };
+            return { content: [{ type: 'text' as const, text: `Double-clicked at (${ax}, ${ay}) on ${spaceLabel(sel.display, sel.displays)}.` }] };
         } catch (err) {
             return { content: [{ type: 'text' as const, text: `Error double-clicking: ${(err as Error).message}` }], isError: true };
         }
@@ -927,26 +977,26 @@ server.registerTool(
     {
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
         description:
-            'Click and drag from one position to another in agent display space. ' +
-            'Useful for selecting text, moving windows, or drag-and-drop operations. ' +
+            'Click and drag from one position to another in screenshot coordinates of the current display. ' +
+            'Useful for selecting text, moving windows, or drag-and-drop operations. To drag between monitors, take a display=-1 screenshot and use its coordinates. ' +
             'After dragging, take a screenshot to verify the result.',
         inputSchema: {
-            startX: z.number().int().describe('Start X in agent display space'),
-            startY: z.number().int().describe('Start Y in agent display space'),
-            endX: z.number().int().describe('End X in agent display space'),
-            endY: z.number().int().describe('End Y in agent display space'),
-            display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop'),
+            startX: z.number().int().describe('Start X in screenshot pixels'),
+            startY: z.number().int().describe('Start Y in screenshot pixels'),
+            endX: z.number().int().describe('End X in screenshot pixels'),
+            endY: z.number().int().describe('End Y in screenshot pixels'),
+            display: displayArg(),
         },
     },
     async ({ startX, startY, endX, endY, display }) => {
         try {
-            const space = await getImageSpace(display);
-            const startErr = validateCoords(space, startX, startY);
+            const sel = await getImageSpace(display);
+            const startErr = coordsError(sel, startX, startY);
             if (startErr) return { content: [{ type: 'text' as const, text: `Start ${startErr}` }], isError: true };
-            const endErr = validateCoords(space, endX, endY);
+            const endErr = coordsError(sel, endX, endY);
             if (endErr) return { content: [{ type: 'text' as const, text: `End ${endErr}` }], isError: true };
-            const start = agentToScreen(space, startX, startY);
-            const end = agentToScreen(space, endX, endY);
+            const start = agentToScreen(sel.space, startX, startY);
+            const end = agentToScreen(sel.space, endX, endY);
             robot.moveMouseSmooth(start.px, start.py);
             await sleep(MOUSE_SETTLE_MS); // wait for move to complete before pressing down
             robot.mouseToggle('down', 'left');
@@ -956,7 +1006,7 @@ server.registerTool(
             } finally {
                 robot.mouseToggle('up', 'left');
             }
-            return { content: [{ type: 'text' as const, text: `Dragged (${startX}, ${startY}) → (${endX}, ${endY}).` }] };
+            return { content: [{ type: 'text' as const, text: `Dragged (${startX}, ${startY}) → (${endX}, ${endY}) on ${spaceLabel(sel.display, sel.displays)}.` }] };
         } catch (err) {
             return { content: [{ type: 'text' as const, text: `Error dragging: ${(err as Error).message}` }], isError: true };
         }
@@ -974,27 +1024,17 @@ server.registerTool(
         inputSchema: {
             y: z.number().int().default(0).describe('Vertical scroll amount (positive = down, negative = up)'),
             x: z.number().int().default(0).describe('Horizontal scroll amount (positive = right, negative = left)'),
-            atX: z.number().int().optional().describe('Optional X in agent display space to move to before scrolling'),
-            atY: z.number().int().optional().describe('Optional Y in agent display space to move to before scrolling'),
-            display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop'),
+            atX: z.number().int().optional().describe('Optional X in screenshot pixels to move to before scrolling'),
+            atY: z.number().int().optional().describe('Optional Y in screenshot pixels to move to before scrolling'),
+            display: displayArg(),
         },
     },
     async ({ x, y, atX, atY, display }) => {
         try {
-            const space = await getImageSpace(display);
-            if ((atX === undefined) !== (atY === undefined)) throw new Error('Provide both atX and atY, or neither.');
-            if (atX !== undefined && atY !== undefined) {
-                const coordErr = validateCoords(space, atX, atY);
-                if (coordErr) return { content: [{ type: 'text' as const, text: coordErr }], isError: true };
-                const { px, py } = agentToScreen(space, atX, atY);
-                robot.moveMouseSmooth(px, py);
-                await sleep(MOUSE_SETTLE_MS);
-            } else {
-                const pos = robot.getMousePos();
-                assertCursorInSpace(space, pos.x, pos.y);
-            }
+            const sel = await getImageSpace(display);
+            await positionCursor(sel, atX, atY, 'atX and atY');
             robot.scrollMouse(x, y);
-            return { content: [{ type: 'text' as const, text: `Scrolled (x: ${x}, y: ${y})${atX !== undefined ? ` at (${atX}, ${atY})` : ''}.` }] };
+            return { content: [{ type: 'text' as const, text: `Scrolled (x: ${x}, y: ${y})${atX !== undefined ? ` at (${atX}, ${atY})` : ''} on ${spaceLabel(sel.display, sel.displays)}.` }] };
         } catch (err) {
             return { content: [{ type: 'text' as const, text: `Error scrolling: ${(err as Error).message}` }], isError: true };
         }
@@ -1005,15 +1045,19 @@ server.registerTool(
     'get_mouse_position',
     {
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description: 'Get the current mouse cursor position in screenshot coordinates for the selected display.',
-        inputSchema: { display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop') },
+        description: 'Get the current mouse cursor position in screenshot coordinates of the current display, and which display it is on.',
+        inputSchema: { display: displayArg() },
     },
     async ({ display }) => {
         try {
-            const space = await getImageSpace(display);
+            const sel = await getImageSpace(display);
             const pos = robot.getMousePos();
-            const { ax, ay } = screenToAgent(space, pos.x, pos.y);
-            return { content: [{ type: 'text' as const, text: `Mouse position: (${ax}, ${ay}) in agent display space.` }] };
+            const label = spaceLabel(sel.display, sel.displays);
+            if (!cursorInSpace(sel.space, pos.x, pos.y)) {
+                return { content: [{ type: 'text' as const, text: `Mouse is ${locatePoint(sel.displays, pos.x, pos.y)}, outside the current ${label}.` }] };
+            }
+            const { ax, ay } = screenToAgent(sel.space, pos.x, pos.y);
+            return { content: [{ type: 'text' as const, text: `Mouse position: (${ax}, ${ay}) on ${label}.` }] };
         } catch (err) {
             return { content: [{ type: 'text' as const, text: `Error getting mouse position: ${(err as Error).message}` }], isError: true };
         }
@@ -1225,7 +1269,7 @@ server.registerTool(
     'get_screen_size',
     {
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description: 'Get physical display geometry and configured screenshot size limits. Use get_screenshot for actual image dimensions.',
+        description: 'List the displays (index, size, position relative to the primary, which one is current) with their physical geometry and the configured screenshot size limits. Use get_screenshot for actual image dimensions.',
     },
     async () => {
         try {
@@ -1236,7 +1280,9 @@ server.registerTool(
                     type: 'text' as const,
                     text:
                         `Virtual desktop: ${bounds.width}×${bounds.height} at (${bounds.x}, ${bounds.y}).\n` +
-                        `Displays: ${displays.map((d, i) => `${i}:${d.name} ${d.width}×${d.height} at (${d.x},${d.y})`).join('; ')}.\n` +
+                        `Displays: ${describeDisplays(displays, selection.current)}.\n` +
+                        `Physical geometry: ${displays.map((d, i) => `${i}:${d.name} ${d.width}×${d.height} at (${d.x},${d.y})`).join('; ')}.\n` +
+                        `Current display: ${selection.current === undefined ? 'full desktop' : selection.current}. Tools without display use it; pass display=N to switch.\n` +
                         `Screenshot limits: WIDTH=${MAX_WIDTH ?? 'unbounded'}, HEIGHT=${MAX_HEIGHT ?? 'unbounded'}. ` +
                         `Take a screenshot for its actual image dimensions.`
                 }]
@@ -1306,18 +1352,19 @@ server.registerTool(
             'Capture a 512×512 screenshot centred on the current mouse cursor at full (native) resolution, ' +
             'with a red crosshair overlay marking the exact cursor position. ' +
             'Useful for inspecting the precise area around the cursor: reading small text, verifying click targets, or confirming hover states. ' +
-            'Returns the screenshot plus the cursor coordinates in agent display space.',
-        inputSchema: { display: z.number().int().min(0).optional().describe('Monitor number used for get_screenshot; omit for full desktop') },
+            'Returns the screenshot plus the cursor coordinates in screenshot pixels of the current display.',
+        inputSchema: { display: displayArg() },
     },
     async ({ display }) => {
         try {
-            const space = await getImageSpace(display);
+            const sel = await getImageSpace(display);
+            const { space } = sel;
             const SIZE = 512;
             const HALF = SIZE / 2;
 
             // 1. Get cursor position in physical screen coordinates
             const mousePos = robot.getMousePos();
-            assertCursorInSpace(space, mousePos.x, mousePos.y);
+            assertCursorInSpace(sel, mousePos.x, mousePos.y);
 
             // 2. Determine capture region, clamped to screen bounds
             const left = Math.max(space.bounds.x, mousePos.x - HALF);
@@ -1332,7 +1379,7 @@ server.registerTool(
             }
 
             // 3. Capture with the same verified backend and geometry as get_screenshot.
-            const captured = await captureScreenshot(resolveDisplay(display));
+            const captured = await captureScreenshot(sel.display);
             if (captured.bounds.x !== space.bounds.x || captured.bounds.y !== space.bounds.y || captured.bounds.width !== space.bounds.width || captured.bounds.height !== space.bounds.height) throw new Error('Display layout changed. Take a new screenshot.');
             let pngBuf = cropPng(captured.buf, left - captured.bounds.x, top - captured.bounds.y, captureW, captureH);
 
@@ -1377,7 +1424,7 @@ server.registerTool(
                     {
                         type: 'text' as const,
                         text: `Cursor area (${SIZE}×${SIZE} native pixels) centred on cursor.\n` +
-                            `Cursor position: (${ax}, ${ay}) in agent space, (${mousePos.x}, ${mousePos.y}) physical.`,
+                            `Cursor position: (${ax}, ${ay}) on ${spaceLabel(sel.display, sel.displays)}, (${mousePos.x}, ${mousePos.y}) physical.`,
                     },
                 ],
             };

@@ -20,7 +20,7 @@
             "environmentVariables": [
                 {
                     "name": "DISPLAY_INDEX",
-                    "description": "Restrict screenshots to a monitor: 0 or unset = full desktop, 1 = primary monitor, 2 = second monitor.",
+                    "description": "Fix all tools to one monitor: 0 or unset = no restriction (tools start on the primary and follow the last display passed), 1 = primary monitor, 2 = second monitor.",
                     "isRequired": false,
                     "format": "number",
                     "isSecret": false

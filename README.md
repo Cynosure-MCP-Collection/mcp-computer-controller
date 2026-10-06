@@ -21,7 +21,7 @@ computer-controller
 | ------------------------ | --------------------------------------------- |
 | `list_applications`      | Index and search installed applications       |
 | `launch_application`     | Launch an application by name                 |
-| `get_screenshot`         | Capture the desktop (multi-monitor support)   |
+| `get_screenshot`         | Capture the current display (multi-monitor)   |
 | `get_cursor_area`        | 512×512 screenshot centered on the cursor     |
 | `move_mouse`             | Move cursor to a position                     |
 | `click_mouse`            | Click at current or specified position        |
@@ -33,7 +33,7 @@ computer-controller
 | `press_key_combination`  | Press key combo (e.g., `ctrl+c`)              |
 | `control_media_playback` | Control media (play/pause/stop/next/previous) |
 | `control_volume`         | Control volume (up/down/mute)                 |
-| `get_screen_size`        | Get display dimensions                        |
+| `get_screen_size`        | List displays and their layout                |
 | `get_system_details`     | OS, CPU, memory, and disk info                |
 | `wait`                   | Pause for 1–10 seconds                        |
 
@@ -41,17 +41,21 @@ The server also exposes the MCP resource `computer-controller://guide` with its 
 
 ### Screenshot coordinates
 
-Call `get_screenshot` first. Its text result contains the actual image dimensions and the selected display. Coordinates are zero-based pixels in **that image**. By default, the screenshot captures the monitor under the cursor. Pass the display number returned by the screenshot to mouse tools. If you captured `display: -1` for the full desktop, omit `display` on mouse tools. Screenshot and mouse tools independently compute the same mapping from the current display geometry and `WIDTH`/`HEIGHT` limits; no token or global "current display" setting is needed.
+Call `get_screenshot` first. Its text result contains the actual image dimensions, the display it shows, and where the other displays are (for example `1: 1920×1080, left of 0`). Coordinates are zero-based pixels in **that image**.
 
-**Version 2 migration:** `GEMINI_MODE` and `sys_prompt_template.txt` were removed; use `WIDTH`/`HEIGHT` and the guide resource. Without size limits, screenshots use native capture dimensions. Mouse tools accept an optional `display` number.
+**Coordinates always refer to the current display.** The current display starts as the primary monitor (`display: 0`). Passing `display` to any tool switches it, and the choice is remembered. Tools called without `display` use the current display. So `get_screenshot({ display: 1 })` followed by `click_mouse({ x, y })` clicks on display 1. `display: -1` selects the full desktop, which is needed to drag between monitors. Coordinates past the image edge are rejected with a hint naming the neighbouring display instead of spilling onto it. Every mouse tool reports which display it acted on.
 
-Omitting `display` captures the monitor under the cursor at capture time. `display: -1` captures the full desktop. `display: 0` selects the primary monitor, `display: 1` the next monitor. A failed monitor capture returns an error; it never returns a different monitor or the full desktop as a successful result. Capture backends are checked against their expected pixel dimensions. On macOS, multi-monitor capture currently fails closed until a geometry-aware backend is available.
+Screenshot and mouse tools compute the same mapping from the current display geometry and the `WIDTH`/`HEIGHT` limits. A failed monitor capture returns an error; it never returns a different monitor or the full desktop as a successful result. Capture backends are checked against their expected pixel dimensions. On macOS, multi-monitor capture currently fails closed until a geometry-aware backend is available.
+
+**Version 2.1 migration:** omitting `display` on mouse tools used to mean the full desktop, and screenshots defaulted to the monitor under the cursor. Both now use the current display, which starts at the primary. Pass `display: -1` for the old full-desktop behaviour. `click_mouse` and `double_click` accept optional `x`/`y`.
+
+**Version 2 migration:** `GEMINI_MODE` and `sys_prompt_template.txt` were removed; use `WIDTH`/`HEIGHT` and the guide resource. Without size limits, screenshots use native capture dimensions.
 
 ## Configuration
 
 | Variable        | Required | Description                                                                                            |
 | --------------- | -------- | ------------------------------------------------------------------------------------------------------ |
-| `DISPLAY_INDEX` | No | Restrict screenshots to a monitor: `0` or unset = no restriction (screenshots default to the cursor monitor); `1` = primary; `2` = second display. |
+| `DISPLAY_INDEX` | No | Restrict screenshots to a monitor: `0` or unset = no restriction (tools start on the primary and follow the last `display` passed); `1` = primary; `2` = second display. |
 | `WIDTH` | No | Maximum screenshot width in pixels (1–16384). |
 | `HEIGHT` | No | Maximum screenshot height in pixels (1–16384). |
 
