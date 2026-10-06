@@ -820,8 +820,17 @@ function sleep(ms: number): Promise<void> {
 /** robotjs' X11 typeString assumes a US keymap and never presses Shift for symbols. */
 const ROBOT_SAFE_TEXT = /^[A-Za-z0-9 \n\t]*$/;
 
+/** Time (ms) the target app gets to read the clipboard after paste before it is restored. */
+const CLIPBOARD_RESTORE_MS = 300;
+
+const WIN_CLIPBOARD_GET = 'powershell -NoProfile -NonInteractive -Command "' +
+    '$c = Get-Clipboard -Raw; if ($c) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($c)) }"';
+const WIN_CLIPBOARD_SET = 'powershell -NoProfile -NonInteractive -Command "' +
+    '$b = [Console]::In.ReadToEnd().Trim(); Set-Clipboard -Value ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b)))"';
+
 /** Type text into the focused control, respecting the active keyboard layout. */
 async function typeText(text: string): Promise<void> {
+    if (!text) return;
     const os = platform();
 
     if (os === 'linux') {
@@ -852,7 +861,7 @@ async function typeText(text: string): Promise<void> {
                 await runCmdInput(text, tool.copy);
                 await sleep(50);
                 robot.keyTap('v', ['control']);
-                await sleep(50);
+                await sleep(CLIPBOARD_RESTORE_MS);
                 if (saved) await runCmdInput(saved, tool.copy).catch(() => { });
                 return;
             } catch { /* try next tool */ }
@@ -867,15 +876,17 @@ async function typeText(text: string): Promise<void> {
         await runCmdInput(text, 'pbcopy');
         await sleep(50);
         robot.keyTap('v', ['command']);
-        await sleep(50);
+        await sleep(CLIPBOARD_RESTORE_MS);
         if (saved) await runCmdInput(saved, 'pbcopy').catch(() => { });
     } else if (os === 'win32') {
-        const saved = await runCmd('powershell -command "Get-Clipboard"').catch(() => null);
-        await runCmdInput(text, 'powershell -command "$input | Set-Clipboard"');
+        // Clipboard text crosses the process boundary as base64: PowerShell reads stdin and writes
+        // stdout in the console code page, which mangles non-ASCII characters.
+        const saved = (await runCmd(WIN_CLIPBOARD_GET).catch(() => '')).trim();
+        await runCmdInput(Buffer.from(text, 'utf8').toString('base64'), WIN_CLIPBOARD_SET);
         await sleep(50);
         robot.keyTap('v', ['control']);
-        await sleep(50);
-        if (saved) await runCmdInput(saved, 'powershell -command "$input | Set-Clipboard"').catch(() => { });
+        await sleep(CLIPBOARD_RESTORE_MS);
+        if (saved) await runCmdInput(saved, WIN_CLIPBOARD_SET).catch(() => { });
     } else {
         robot.typeString(text);
     }
