@@ -14,6 +14,7 @@ import { scaleScreenshot, imageSize, agentToScreen, screenToAgent, validateCoord
 import { GUIDE, GUIDE_URI } from './guide.js';
 import { displayAtCursor, DisplaySelection, describeDisplays, neighbor, type Side } from './displays.js';
 import { typeViaXTest } from './xtest.js';
+import { captureLinux, captureWithRobotjs, cropPng } from './screenshots.js';
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Display restriction
@@ -223,37 +224,11 @@ function launchApp(execCmd: string): Promise<string> {
 // Screenshot capture
 // ══════════════════════════════════════════════════════════════════════════════
 
-/** Convert robotjs BGRA bitmap to PNG buffer */
-function bitmapToPng(bitmap: { image: Buffer; width: number; height: number }): Buffer {
-    const { width, height, image: bgra } = bitmap;
-    const png = new PNG({ width, height });
-
-    for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-            const srcIdx = (y * width + x) * 4;
-            const dstIdx = (y * width + x) * 4;
-            png.data[dstIdx + 0] = bgra[srcIdx + 2]; // R (from B)
-            png.data[dstIdx + 1] = bgra[srcIdx + 1]; // G
-            png.data[dstIdx + 2] = bgra[srcIdx + 0]; // B (from R)
-            png.data[dstIdx + 3] = 255;               // A
-        }
-    }
-
-    return PNG.sync.write(png);
-}
-
-/** Primary: capture screenshot using robotjs (no external tools needed) */
-function captureWithRobotjs(): Buffer {
-    const size = robot.getScreenSize();
-    const bitmap = robot.screen.capture(0, 0, size.width, size.height);
-    return bitmapToPng(bitmap);
-}
-
 /** Capture using a backend whose pixel bounds can be verified. */
-function captureWithExternalTools(display?: number, bounds?: Rect): Promise<Buffer> {
+function captureWithExternalTools(display: number | undefined, bounds: Rect, displays: DisplayGeometry[]): Promise<Buffer> {
     const os = platform();
-    if (os === 'linux') return captureLinux(display);
-    if (os === 'win32') return captureWindows(bounds!);
+    if (os === 'linux') return captureLinux(bounds, unionBounds(displays), display === undefined ? undefined : displays[display].name);
+    if (os === 'win32') return captureWindows(bounds);
     if (os === 'darwin') return captureMac(display);
     return Promise.reject(new Error(`Unsupported platform: ${os}`));
 }
@@ -268,84 +243,24 @@ async function captureScreenshot(display?: number): Promise<{ buf: Buffer; bound
     const layout = JSON.stringify(displays);
     let buf: Buffer;
     try {
-        buf = await captureWithExternalTools(display, bounds);
+        buf = await captureWithExternalTools(display, bounds, displays);
     } catch (externalError) {
-        // RobotJS captures from (0,0). It is only a safe fallback if that
-        // rectangle is exactly the requested capture, including its origin.
-        const size = robot.getScreenSize();
-        if (bounds.x !== 0 || bounds.y !== 0 || bounds.width !== size.width || bounds.height !== size.height) {
-            throw new Error(`Screenshot backend failed and RobotJS geometry does not match: ${(externalError as Error).message}`);
+        try {
+            buf = captureWithRobotjs(robot, bounds);
+        } catch (robotError) {
+            throw new Error(`Screenshot backends failed. External: ${(externalError as Error).message} RobotJS: ${(robotError as Error).message}`);
         }
-        buf = captureWithRobotjs();
     }
     let dims = getPngDimensions(buf);
     if (dims.width !== bounds.width || dims.height !== bounds.height) {
-        const size = robot.getScreenSize();
-        if (bounds.x === 0 && bounds.y === 0 && bounds.width === size.width && bounds.height === size.height) {
-            buf = captureWithRobotjs();
-            dims = getPngDimensions(buf);
-        }
+        buf = captureWithRobotjs(robot, bounds);
+        dims = getPngDimensions(buf);
         if (dims.width !== bounds.width || dims.height !== bounds.height) {
             throw new Error(`Screenshot is ${dims.width}×${dims.height}, but display geometry is ${bounds.width}×${bounds.height}. No coordinates were issued.`);
         }
     }
     if (layout !== await currentLayoutId()) throw new Error('Display layout changed during capture. Retry the screenshot.');
     return { buf, bounds, layout };
-}
-
-function captureLinux(display?: number): Promise<Buffer> {
-    const tmpFile = path.join(tmpdir(), `mcp-screenshot-${randomBytes(12).toString('hex')}.png`);
-    return new Promise((resolve, reject) => {
-        (async () => {
-            // Resolve display geometry + output name from numeric index.
-            // On Wayland, grim needs the output NAME (e.g. "HDMI-1"), not a numeric index.
-            // On GNOME Wayland, xrandr (via XWayland) provides the geometry for cropping.
-            let geom: DisplayGeometry | undefined;
-            let outputName: string | undefined;
-            if (display !== undefined) {
-                const displays = await getLinuxDisplayGeometries();
-                if (displays.length > display) {
-                    geom = displays[display];
-                    outputName = displays[display].name;
-                }
-            }
-
-            // ── grim (Wayland native) ────────────────────────────────────────
-            // Use resolved output name; if no name was resolved, capture all outputs.
-            try {
-                const grimArgs = outputName ? ['-o', outputName, tmpFile] : [tmpFile];
-                await execFilePromise('grim', grimArgs);
-                // grim with -o already captures a single output — no cropping needed.
-                return readAndCleanup(tmpFile, resolve, reject);
-            } catch { /* grim not available or failed */ }
-
-            // ── Fallback tools: capture all displays, then crop ──────────────
-            // None of these tools support per-display selection reliably on Wayland,
-            // so we capture the full desktop and crop to the requested display bounds.
-            const captureAll = async (): Promise<void> => {
-                try { await execFilePromise('gnome-screenshot', ['--file', tmpFile]); return; } catch { /* next */ }
-                try { await execFilePromise('scrot', [tmpFile]); return; } catch { /* next */ }
-                try { await execFilePromise('import', ['-window', 'root', tmpFile]); return; } catch { /* next */ }
-                throw new Error('No screenshot tool found. Install one of: grim (Wayland), gnome-screenshot, scrot, or imagemagick.');
-            };
-
-            await captureAll();
-
-            // Crop to specific display if we know its geometry
-            if (geom) {
-                try {
-                    const fullBuf = await fs.readFile(tmpFile);
-                    fs.unlink(tmpFile).catch(() => { });
-                    const all = await getLinuxDisplayGeometries();
-                    const virtual = unionBounds(all);
-                    resolve(cropPng(fullBuf, geom.x - virtual.x, geom.y - virtual.y, geom.width, geom.height));
-                    return;
-                } catch (err) { reject(err); return; }
-            }
-
-            readAndCleanup(tmpFile, resolve, reject);
-        })().catch(reject);
-    });
 }
 
 function captureWindows(bounds: Rect): Promise<Buffer> {
@@ -548,20 +463,6 @@ async function positionCursor(sel: Selected, x: number | undefined, y: number | 
 function displayArg() {
     return z.number().int().min(-1).optional().describe(
         'Display number (-1 = full desktop). Omit to use the current display: the primary at start, then whichever display was last passed to any tool.');
-}
-
-/** Crop a PNG buffer to the given rectangle. */
-function cropPng(buf: Buffer, x: number, y: number, w: number, h: number): Buffer {
-    const src = PNG.sync.read(buf);
-    if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > src.width || y + h > src.height) {
-        throw new Error('Requested monitor does not fit within the captured desktop.');
-    }
-    const dst = new PNG({ width: w, height: h });
-    for (let row = 0; row < h; row++) {
-        const srcOff = ((y + row) * src.width + x) * 4;
-        src.data.copy(dst.data, row * w * 4, srcOff, srcOff + w * 4);
-    }
-    return PNG.sync.write(dst);
 }
 
 async function readAndCleanup(filePath: string, resolve: (buf: Buffer) => void, reject: (err: Error) => void): Promise<void> {
