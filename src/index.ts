@@ -486,6 +486,8 @@ const server = new McpServer({
     title: 'Computer Controller',
     description: 'Desktop automation: launch apps, capture screenshots, control mouse and keyboard.',
     icons: [{ src: `https://unpkg.com/@cynosure-mcp/computer-controller@${PACKAGE_VERSION}/icon.png`, mimeType: 'image/png' }],
+}, {
+    instructions: GUIDE,
 });
 
 server.registerResource('computer_controller_guide', GUIDE_URI, {
